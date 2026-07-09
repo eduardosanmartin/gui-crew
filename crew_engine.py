@@ -12,7 +12,7 @@ Public surface
 * ``CrewEngine`` — spawns background-thread executions, exposes ``run`` /
   ``stop`` / ``test_agent``.
 * ``ProgressToolWrapper`` — wraps CrewAI tools for progress events + cooperative
-  cancellation every 5 s.
+  cancellation.
 * ``ExecutionHandle`` — thread + flag + listener that ``run()`` returns.
 * ``load_pricing`` / ``calculate_cost`` — pricing helpers.
 """
@@ -59,7 +59,10 @@ except ImportError:
     pass
 
 import models  # project Pydantic layer
+import pydantic
 
+# Non-None base for ProgressToolWrapper (handles CrewAI-not-installed case)
+_ProgressToolBase = _CrewAIBaseTool if _CrewAIBaseTool is not None else object
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Type aliases
@@ -201,12 +204,20 @@ class CancelledError(Exception):
 #  ProgressToolWrapper
 # ═══════════════════════════════════════════════════════════════════════════
 
-class ProgressToolWrapper:
-    """Wraps a CrewAI tool to emit ``tool.progress`` events every 5 s and
-    support cooperative cancellation.
+class ProgressToolWrapper(_ProgressToolBase):
+    """Wraps a CrewAI tool to emit ``tool.progress`` events and support
+    cooperative cancellation.
 
     The wrapper delegates to the inner tool's ``_run`` method while checking
     ``flag["stop"]`` on each progress pulse.
+
+    .. note::
+
+       Cancellation is **cooperative** — the inner tool's call runs in a
+       background thread and is polled every ~1 s.  ``future.cancel()`` does
+       **not** stop an actively running Python call (it returns ``False`` for
+       running futures).  The tool must reach a yield / return point on its
+       own; no sub-second responsiveness is guaranteed.
 
     Parameters
     ----------
@@ -227,25 +238,33 @@ class ProgressToolWrapper:
         on_event: EventCallback,
         crew_id: str,
     ) -> None:
+        # Safely extract name/description (MagicMock returns non-string
+        # for missing attributes, which would fail Pydantic validation).
+        _raw_name = getattr(tool, "name", None)
+        name = _raw_name if isinstance(_raw_name, str) else "UnknownTool"
+        _raw_desc = getattr(tool, "description", None)
+        description = _raw_desc if isinstance(_raw_desc, str) else ""
+        if _CrewAIBaseTool is not None:
+            super().__init__(name=name, description=description)
+        else:
+            super().__init__()
         self._inner_tool = tool
         self._flag = flag
         self._on_event = on_event
         self._crew_id = crew_id
-
-    @property
-    def name(self) -> str:
-        return getattr(self._inner_tool, "name", "UnknownTool")
-
-    @property
-    def description(self) -> str:
-        return getattr(self._inner_tool, "description", "")
 
     def __getattr__(self, name: str) -> Any:
         """Forward attribute access to the inner tool."""
         return getattr(self._inner_tool, name)
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:
-        """Execute the inner tool with progress pulses."""
+        """Execute the inner tool with progress pulses.
+
+        Cancellation is cooperative — the inner tool runs in a separate
+        thread and is checked every ~1 s.  ``future.cancel()`` does **not**
+        abort an already-running Python call; it returns ``False`` for
+        running futures.  The tool must reach a yield / return point.
+        """
         start_ts = time.monotonic()
         tool_name = self.name
         last_pulse = start_ts
@@ -265,11 +284,12 @@ class ProgressToolWrapper:
 
         # Start the inner tool in a background thread so we can pulse
         import concurrent.futures
-        results: Any = None
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(self._inner_tool._run, *args, **kwargs)
             while not future.done():
                 if self._flag.get("stop"):
+                    # NOTE: future.cancel() returns False for running
+                    # futures — the underlying call is NOT stopped.
                     future.cancel()
                     raise CancelledError("Tool cancelled by user")
                 elapsed = time.monotonic() - start_ts
@@ -281,11 +301,52 @@ class ProgressToolWrapper:
                 except concurrent.futures.TimeoutError:
                     pass
 
+            # Future is done — get result (re-raises if tool raised)
+            results = future.result()
+
         # Final pulse
         elapsed = time.monotonic() - start_ts
         _pulse(elapsed)
 
         return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  JSON Schema → Pydantic model (for output_json)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _json_schema_to_pydantic_model(schema: dict) -> type:
+    """Convert a JSON Schema dict to a dynamic Pydantic model class.
+
+    This is used to convert ``TaskModel.output_json_schema`` (a ``dict``)
+    into the ``type[BaseModel]`` that CrewAI's ``Task`` expects for
+    ``output_json``.
+    """
+    from typing import Optional
+
+    _TYPE_MAP: dict[str, type] = {
+        "string": str,
+        "integer": int,
+        "number": float,
+        "boolean": bool,
+        "array": list,
+        "object": dict,
+    }
+
+    properties = schema.get("properties", {})
+    required_fields = set(schema.get("required", []))
+
+    fields: dict[str, tuple] = {}
+    for field_name, field_schema in properties.items():
+        json_type = field_schema.get("type", "string")
+        py_type = _TYPE_MAP.get(json_type, str)
+        if field_name in required_fields:
+            fields[field_name] = (py_type, ...)
+        else:
+            fields[field_name] = (Optional[py_type], None)
+
+    model_name = schema.get("title", "OutputModel")
+    return pydantic.create_model(model_name, **fields)  # type: ignore[no-untyped-call]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -432,9 +493,12 @@ class Adapter:
                     for t in agent_model.tools
                 ]
 
-            # Memory
-            if agent_model.memory:
-                agent_kwargs["memory"] = agent_model.memory
+            # Memory (resolve MemoryConfig → bool)
+            if isinstance(agent_model.memory, models.MemoryConfig):
+                if agent_model.memory.enabled:
+                    agent_kwargs["memory"] = True
+            elif agent_model.memory:
+                agent_kwargs["memory"] = True
 
             # Optional fields
             if agent_model.max_iter is not None:
@@ -477,7 +541,9 @@ class Adapter:
             if task_model.output_file:
                 task_kwargs["output_file"] = task_model.output_file
             if task_model.output_json_schema:
-                task_kwargs["output_json"] = task_model.output_json_schema
+                task_kwargs["output_json"] = _json_schema_to_pydantic_model(
+                    task_model.output_json_schema
+                )
             if task_model.human_input:
                 task_kwargs["human_input"] = True
             if task_model.async_execution:
@@ -519,14 +585,22 @@ class Adapter:
             "verbose": crew_model.verbose,
         }
 
-        if crew_model.memory:
-            crew_kwargs["memory"] = crew_model.memory
+        if isinstance(crew_model.memory, models.MemoryConfig):
+            if crew_model.memory.enabled:
+                crew_kwargs["memory"] = True
+        elif crew_model.memory:
+            crew_kwargs["memory"] = True
         if crew_model.planning:
             crew_kwargs["planning"] = True
         if crew_model.manager_llm:
             crew_kwargs["manager_llm"] = Adapter._build_llm(crew_model.manager_llm)
         if crew_model.manager_agent_role:
-            crew_kwargs["manager_agent"] = crew_model.manager_agent_role
+            matching = [
+                a for a in crewai_agents
+                if a.role == crew_model.manager_agent_role
+            ]
+            if matching:
+                crew_kwargs["manager_agent"] = matching[0]
         if crew_model.knowledge_sources:
             crew_kwargs["knowledge_sources"] = crew_model.knowledge_sources
         if crew_model.embedder:
@@ -812,6 +886,7 @@ class CrewEngine:
 
         def _worker() -> None:
             try:
+                listener.register()
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
