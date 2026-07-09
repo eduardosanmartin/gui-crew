@@ -90,6 +90,17 @@ class TestCrewModelState:
             cm = builder._crew_model()
         assert cm is orig
 
+    def test_corrupt_preserves_raw_and_notifies(self) -> None:
+        """When storage has an invalid dict, corrupt data is preserved under separate key."""
+        user = _make_user({"crew_model": {"name": None}})
+        with patch.object(
+            Storage, "user", new_callable=PropertyMock, return_value=user
+        ):
+            cm = builder._crew_model()
+        assert isinstance(cm, m.CrewModel)
+        assert cm.name == "New Crew"
+        assert user.get("crew_model_corrupt") == {"name": None}
+
 
 class TestPersist:
     """``_persist`` validates and writes to storage."""
@@ -226,6 +237,49 @@ class TestAgentFormValidation:
         assert agent.llm.model == "claude-3-5-sonnet"
         assert agent.llm.temperature == 0.3
 
+    def test_agent_llm_temperature_zero_preserved(self) -> None:
+        """Temperature 0 is preserved, not treated as falsy."""
+        agent = m.AgentModel(
+            role="AI",
+            goal="Zero temp",
+            llm=m.LLMModel(model="gpt-4o", temperature=0.0),
+        )
+        assert agent.llm is not None
+        assert agent.llm.temperature == 0.0
+
+    def test_agent_model_copy_does_not_mutate_original(self) -> None:
+        """model_copy(deep=True) creates an independent clone."""
+        original = m.AgentModel(
+            role="Researcher",
+            goal="Research",
+            llm=m.LLMModel(model="gpt-4", temperature=0.5),
+            tools=[m.ToolRef(kind="builtin", name="SerperDevTool")],
+        )
+        copy = original.model_copy(deep=True)
+        copy.role = "Hacker"
+        copy.llm.model = "gpt-4o"  # type: ignore[union-attr]
+        copy.tools = []
+
+        assert original.role == "Researcher"
+        assert original.llm is not None
+        assert original.llm.model == "gpt-4"
+        assert len(original.tools) == 1
+
+    def test_agent_model_copy_odd_even_bug(self) -> None:
+        """Editing N different agents via copy preserves original N agents."""
+        agents = [
+            m.AgentModel(role=f"Agent_{i}", goal=f"Goal_{i}")
+            for i in range(3)
+        ]
+        copies = [a.model_copy(deep=True) for a in agents]
+        copies[0].role = "Modified_0"
+        copies[1].role = "Modified_1"
+        copies[2].role = "Modified_2"
+        # Originals must be untouched
+        assert agents[0].role == "Agent_0"
+        assert agents[1].role == "Agent_1"
+        assert agents[2].role == "Agent_2"
+
 
 # ============================================================================
 #  Task Form Validation
@@ -329,6 +383,39 @@ class TestTaskFormValidation:
         )
         assert len(task.guardrails) == 2
         assert task.guardrail_max_retries == 2
+
+    def test_task_guardrail_max_retries_zero(self) -> None:
+        """guardrail_max_retries can be set to 0 (not treated as falsy)."""
+        task = m.TaskModel(
+            name="Zero Guard", description="D", expected_output="E",
+            guardrail_max_retries=0,
+        )
+        assert task.guardrail_max_retries == 0
+
+    def test_task_guardrail_max_retries_default(self) -> None:
+        """guardrail_max_retries defaults to 3 when not set."""
+        task = m.TaskModel(
+            name="Default Guard", description="D", expected_output="E",
+        )
+        assert task.guardrail_max_retries == 3
+
+    def test_task_model_copy_does_not_mutate_original(self) -> None:
+        """model_copy(deep=True) on TaskModel creates an independent clone."""
+        original = m.TaskModel(
+            name="Original", description="Desc", expected_output="Out",
+            context=["A", "B"],
+            tools=[m.ToolRef(kind="builtin", name="SerperDevTool")],
+            guardrail_max_retries=5,
+        )
+        copy = original.model_copy(deep=True)
+        copy.name = "Modified"
+        copy.context.append("C")
+        copy.tools = []
+
+        assert original.name == "Original"
+        assert original.context == ["A", "B"]
+        assert len(original.tools) == 1
+        assert original.guardrail_max_retries == 5
 
     def test_agent_role_references_existing_agent(self) -> None:
         with pytest.raises(ValueError, match="references agent_role"):

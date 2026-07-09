@@ -12,6 +12,7 @@ Public surface
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from nicegui import app, ui
@@ -45,6 +46,9 @@ BUILTIN_TOOLS: list[dict[str, str]] = [
 #  State helpers
 # ============================================================================
 
+logger = logging.getLogger(__name__)
+
+
 def _crew_model() -> m.CrewModel:
     """Return the current crew model from session storage.
 
@@ -59,12 +63,25 @@ def _crew_model() -> m.CrewModel:
         try:
             return m.CrewModel(**raw)
         except Exception:
+            logger.warning(
+                "Corrupt crew_model in storage, falling back to default. "
+                "Raw data preserved under 'crew_model_corrupt' key."
+            )
+            ui.notify(
+                "Crew data was corrupted and has been reset. "
+                "Your previous data is preserved for recovery.",
+                type="warning",
+                position="top",
+                close_button="OK",
+            )
+            app.storage.user["crew_model_corrupt"] = raw
             cm = m.CrewModel(name="New Crew")
             app.storage.user["crew_model"] = cm.model_dump()
             return cm
     # Already a CrewModel instance (NiceGUI can keep objects across renders)
     if isinstance(raw, m.CrewModel):
         return raw
+    logger.warning("Unexpected crew_model type %s, resetting.", type(raw).__name__)
     cm = m.CrewModel(name="New Crew")
     app.storage.user["crew_model"] = cm.model_dump()
     return cm
@@ -232,7 +249,7 @@ def _render_agent_list(cm: m.CrewModel) -> None:
 
     def _open_agent_dialog(agent: m.AgentModel | None, idx: int) -> None:
         is_new = agent is None
-        edit_agent = agent or m.AgentModel(role="", goal="")
+        edit_agent = agent.model_copy(deep=True) if agent else m.AgentModel(role="", goal="")
 
         with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
             ui.label("Add Agent" if is_new else f"Edit Agent: {edit_agent.role}").classes(
@@ -279,19 +296,37 @@ def _render_agent_list(cm: m.CrewModel) -> None:
 
             def _save_agent() -> None:
                 nonlocal edit_agent
-                edit_agent.role = (role.value or "").strip()
-                edit_agent.goal = (goal.value or "").strip()
-                edit_agent.backstory = backstory.value or ""
-                edit_agent.allow_delegation = allow_del.value
-                edit_agent.allow_code_execution = allow_code.value
-                edit_agent.max_iter = int(max_iter.value) if max_iter.value and max_iter.value > 0 else None
-                edit_agent.multimodal = multimodal.value
+                # Collect values from form controls
+                role_val = (role.value or "").strip()
+                goal_val = (goal.value or "").strip()
+                backstory_val = backstory.value or ""
+                allow_del_val = allow_del.value
+                allow_code_val = allow_code.value
+                max_iter_val = int(max_iter.value) if max_iter.value and max_iter.value > 0 else None
+                multimodal_val = multimodal.value
+
+                # Validate before mutating edit_agent
+                if not role_val:
+                    ui.notify("Agent role is required", type="negative")
+                    return
+                if not goal_val:
+                    ui.notify("Agent goal is required", type="negative")
+                    return
+
+                # Apply values to edit_agent (copy — safe to mutate now)
+                edit_agent.role = role_val
+                edit_agent.goal = goal_val
+                edit_agent.backstory = backstory_val
+                edit_agent.allow_delegation = allow_del_val
+                edit_agent.allow_code_execution = allow_code_val
+                edit_agent.max_iter = max_iter_val
+                edit_agent.multimodal = multimodal_val
 
                 # LLM
                 if llm_model.value:
                     edit_agent.llm = m.LLMModel(
                         model=llm_model.value,
-                        temperature=llm_temp.value if llm_temp.value else None,
+                        temperature=llm_temp.value if llm_temp.value is not None else None,
                     )
                 else:
                     edit_agent.llm = None
@@ -303,14 +338,6 @@ def _render_agent_list(cm: m.CrewModel) -> None:
                     if cb.value
                 ]
                 edit_agent.tools = selected
-
-                # Validate agent fields
-                if not edit_agent.role:
-                    ui.notify("Agent role is required", type="negative")
-                    return
-                if not edit_agent.goal:
-                    ui.notify("Agent goal is required", type="negative")
-                    return
 
                 if is_new:
                     cm.agents.append(edit_agent)
@@ -385,7 +412,7 @@ def _render_task_list(cm: m.CrewModel) -> None:
 
     def _open_task_dialog(task: m.TaskModel | None, idx: int) -> None:
         is_new = task is None
-        edit_task = task or m.TaskModel(
+        edit_task = task.model_copy(deep=True) if task else m.TaskModel(
             name="", description="", expected_output=""
         )
 
@@ -447,51 +474,65 @@ def _render_task_list(cm: m.CrewModel) -> None:
 
             def _save_task() -> None:
                 nonlocal edit_task
-                edit_task.name = (task_name.value or "").strip()
-                edit_task.description = (task_desc.value or "").strip()
-                edit_task.expected_output = (task_output.value or "").strip()
-                edit_task.agent_role = (task_agent.value or "").strip() or None
-                edit_task.output_file = output_file.value.strip() or None
-                edit_task.human_input = human_input.value
-                edit_task.async_execution = async_exec.value
-                edit_task.markdown = markdown.value
-                edit_task.guardrail_max_retries = int(gr_count.value) if gr_count.value else 3
+                # Collect values from form controls
+                name_val = (task_name.value or "").strip()
+                desc_val = (task_desc.value or "").strip()
+                output_val = (task_output.value or "").strip()
+                agent_role_val = (task_agent.value or "").strip() or None
+                output_file_val = output_file.value.strip() or None
+                human_input_val = human_input.value
+                async_exec_val = async_exec.value
+                markdown_val = markdown.value
+                guardrail_retries = int(gr_count.value) if gr_count.value is not None else 3
 
                 # Context - collect from checkboxes
-                edit_task.context = [
+                context_val = [
                     tn for tn, cb in ctx_selections.items() if cb.value
                 ]
 
                 # Task tools
-                edit_task.tools = [
+                tools_val = [
                     m.ToolRef(kind="builtin", name=tn)
                     for tn, cb in task_tool_selections.items()
                     if cb.value
                 ]
 
-                # Validate
-                if not edit_task.name:
+                # Validate before mutating edit_task
+                if not name_val:
                     ui.notify("Task name is required", type="negative")
                     return
-                if not edit_task.description:
+                if not desc_val:
                     ui.notify("Task description is required", type="negative")
                     return
-                if not edit_task.expected_output:
+                if not output_val:
                     ui.notify("Expected output is required", type="negative")
                     return
 
-                # Validate output_file path
-                if edit_task.output_file:
+                # Validate output_file path early
+                if output_file_val:
                     try:
                         m.TaskModel(
-                            name=edit_task.name,
-                            description=edit_task.description,
-                            expected_output=edit_task.expected_output,
-                            output_file=edit_task.output_file,
+                            name=name_val,
+                            description=desc_val,
+                            expected_output=output_val,
+                            output_file=output_file_val,
                         )
                     except Exception as exc:
                         ui.notify(f"Output file error: {exc}", type="negative")
                         return
+
+                # Apply values to edit_task (copy — safe to mutate now)
+                edit_task.name = name_val
+                edit_task.description = desc_val
+                edit_task.expected_output = output_val
+                edit_task.agent_role = agent_role_val
+                edit_task.output_file = output_file_val
+                edit_task.human_input = human_input_val
+                edit_task.async_execution = async_exec_val
+                edit_task.markdown = markdown_val
+                edit_task.guardrail_max_retries = guardrail_retries
+                edit_task.context = context_val
+                edit_task.tools = tools_val
 
                 if is_new:
                     cm.tasks.append(edit_task)
