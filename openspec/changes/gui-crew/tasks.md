@@ -140,12 +140,12 @@ Chain strategy: **feature-branch-chain**
   - **AC**: GIVEN a completed run with 1k input / 2k output tokens on gpt-4o, WHEN calculating cost, THEN result matches `pricing.yaml` rates within ±5%.
   - **Deps**: 1.15
 
-- [ ] 1.19 Implement callback routing (template IDs → callables) (~40 LOC, Risk: Low)
+- [x] 1.19 Implement callback routing (template IDs → callables) (~40 LOC, Risk: Low)
   - **Description**: Expands builder `callbacks` dict (template IDs) to actual Python callables. Errors logged, never re-raised.
   - **AC**: GIVEN a callback template id `"log_to_file"`, WHEN crew executes, THEN the callback runs for each step. WHEN callback raises, THEN crew continues and error is logged.
   - **Deps**: 1.13
 
-- [ ] 1.20 Write engine unit + integration tests (~150 LOC, Risk: Med)
+- [x] 1.20 Write engine unit + integration tests (~150 LOC, Risk: Med)
   - **Description**: Monkeypatch `crewai` for Adapter tests. Synthetic event tests for BridgeListener. End-to-end toy crew kickoff with real `crewai` (mock LLM).
   - **AC**: GIVEN test suite, WHEN running `pytest tests/test_engine.py`, THEN all assertions pass including multi-tab event isolation.
   - **Deps**: 1.13–1.19
