@@ -17,6 +17,7 @@ from typing import Callable
 
 from nicegui import app, ui
 
+import builder as builder_module
 from styles import THEME
 
 # ═══════════════════════════════════════════════
@@ -154,8 +155,8 @@ def index() -> None:
 
 @ui.page("/builder")
 def builder() -> None:
-    """Builder view — crew, agent, and task configuration forms."""
-    render_page("Builder", _render_builder_placeholder)
+    """Builder view - crew, agent, and task configuration forms."""
+    render_page("Builder", builder_module.render_builder)
 
 
 @ui.page("/canvas")
