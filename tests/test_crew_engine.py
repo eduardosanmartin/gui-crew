@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pydantic
 import pytest
 
 from crew_engine import (
@@ -217,6 +218,61 @@ class TestProgressToolWrapper:
         err = CancelledError("Stop requested")
         assert isinstance(err, Exception)
         assert str(err) == "Stop requested"
+
+    def test_returns_inner_tool_result(self):
+        """_run() returns the inner tool's result, not None."""
+        from crew_engine import _CrewAIBaseTool
+
+        inner = MagicMock()
+        inner.name = "ResultTool"
+        inner._run.return_value = "task output"
+
+        flag = {"stop": False}
+        events: list[dict] = []
+
+        wrapper = ProgressToolWrapper(
+            tool=inner,
+            flag=flag,
+            on_event=events.append,
+            crew_id="test-crew-1",
+        )
+        result = wrapper._run()
+        assert result == "task output"
+
+    def test_propagates_inner_tool_exception(self):
+        """Exceptions from the inner tool propagate through _run()."""
+        inner = MagicMock()
+        inner.name = "FailTool"
+        inner._run.side_effect = RuntimeError("inner failure")
+
+        flag = {"stop": False}
+        events: list[dict] = []
+
+        wrapper = ProgressToolWrapper(
+            tool=inner,
+            flag=flag,
+            on_event=events.append,
+            crew_id="test-crew-1",
+        )
+        with pytest.raises(RuntimeError, match="inner failure"):
+            wrapper._run()
+
+    def test_is_basetool_subclass(self):
+        """ProgressToolWrapper inherits from _CrewAIBaseTool."""
+        from crew_engine import _CrewAIBaseTool, _ProgressToolBase
+
+        assert issubclass(ProgressToolWrapper, _ProgressToolBase)
+        if _CrewAIBaseTool is not None:
+            assert issubclass(ProgressToolWrapper, _CrewAIBaseTool)
+            wrapper = ProgressToolWrapper(
+                tool=MagicMock(),
+                flag={"stop": False},
+                on_event=lambda e: None,
+                crew_id="t1",
+            )
+            # CrewAI's isinstance check for BaseTool
+            from crewai.tools import BaseTool
+            assert isinstance(wrapper, BaseTool)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -577,19 +633,23 @@ class TestAdapterCrew:
 
         crew_model = _make_crew()
         crew_model.process = "hierarchical"
-        crew_model.manager_agent_role = "PM"
+        crew_model.manager_agent_role = "Researcher"  # matches _make_agent role
 
         with patch(_MOD_CREWAI_CREW) as MockCrew, \
              patch(_MOD_CREWAI_AGENT) as MockAgent, \
              patch(_MOD_CREWAI_LLM) as MockLLM, \
              patch(_MOD_CREWAI_TASK) as MockTask:
-            MockCrew.return_value = MagicMock()
-            MockAgent.return_value = MagicMock()
+            mock_agent = MagicMock()
+            mock_agent.role = "Researcher"
+            MockAgent.return_value = mock_agent
             MockLLM.return_value = MagicMock()
+            MockCrew.return_value = MagicMock()
             MockTask.return_value = MagicMock()
             Adapter.build_crewai_object(crew_model)
             call_kwargs = MockCrew.call_args[1]
-            assert call_kwargs.get("manager_agent") == "PM"
+            assert call_kwargs.get("manager_agent") is not None
+            # manager_agent should be the resolved Agent, not a string
+            assert call_kwargs["manager_agent"] is mock_agent
 
     def test_crew_with_memory(self):
         from crew_engine import Adapter
@@ -882,6 +942,226 @@ class TestCrewEngineTestTask:
         result = engine.test_task(crew, "t1", "mock context")
         assert "Fase 2" in result
         assert "t1" in result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Fix verification tests — BridgeListener registration
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBridgeListenerRegistration:
+    """Verify that BridgeListener.register() is called in CrewEngine.run()."""
+
+    def test_listener_registered_during_run(self):
+        """BridgeListener.register is called when run() starts."""
+        engine = CrewEngine()
+        events: list[dict] = []
+
+        with patch("crew_engine.Adapter.build_crewai_object") as mock_build, \
+             patch("crew_engine.BridgeListener.register") as mock_register, \
+             patch("crew_engine.BridgeListener.unregister") as mock_unregister:
+            mock_crew = MagicMock()
+
+            async def _fast(*args, **kwargs):
+                return MagicMock(token_usage={})
+
+            mock_crew.kickoff_async = _fast
+            mock_build.return_value = mock_crew
+
+            handle = engine.run(_make_crew(), {}, on_event=events.append)
+            handle.thread.join(timeout=5)
+
+            # register() must be called
+            mock_register.assert_called_once()
+            # unregister() must be called in finally
+            mock_unregister.assert_called_once()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Memory config tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestMemoryConversion:
+    """MemoryConfig is resolved to bool for CrewAI."""
+
+    def test_agent_memory_config_enabled(self):
+        """MemoryConfig(enabled=True) passes memory=True."""
+        from crew_engine import Adapter
+
+        agent_model = _make_agent(role="MemAgent")
+        agent_model.memory = models.MemoryConfig(enabled=True)
+
+        with patch(_MOD_CREWAI_AGENT) as MockAgent, \
+             patch(_MOD_CREWAI_LLM) as MockLLM, \
+             patch(_MOD_CREWAI_CREW) as MockCrew, \
+             patch(_MOD_CREWAI_TASK) as MockTask:
+            MockAgent.return_value = MagicMock()
+            MockLLM.return_value = MagicMock()
+            MockCrew.return_value = MagicMock()
+            MockTask.return_value = MagicMock()
+            Adapter.build_crewai_object(
+                _make_crew(agents=[agent_model], tasks=[_make_task()])
+            )
+            call_kwargs = MockAgent.call_args[1]
+            assert call_kwargs.get("memory") is True
+
+    def test_agent_memory_config_disabled(self):
+        """MemoryConfig(enabled=False) does NOT pass memory."""
+        from crew_engine import Adapter
+
+        agent_model = _make_agent(role="MemAgent")
+        agent_model.memory = models.MemoryConfig(enabled=False)
+
+        with patch(_MOD_CREWAI_AGENT) as MockAgent, \
+             patch(_MOD_CREWAI_LLM) as MockLLM, \
+             patch(_MOD_CREWAI_CREW) as MockCrew, \
+             patch(_MOD_CREWAI_TASK) as MockTask:
+            MockAgent.return_value = MagicMock()
+            MockLLM.return_value = MagicMock()
+            MockCrew.return_value = MagicMock()
+            MockTask.return_value = MagicMock()
+            Adapter.build_crewai_object(
+                _make_crew(agents=[agent_model], tasks=[_make_task()])
+            )
+            call_kwargs = MockAgent.call_args[1]
+            assert "memory" not in call_kwargs
+
+    def test_agent_memory_bool_true(self):
+        """agent_model.memory=True passes memory=True."""
+        from crew_engine import Adapter
+
+        agent_model = _make_agent(role="MemAgent")
+        agent_model.memory = True  # type: ignore[assignment]
+
+        with patch(_MOD_CREWAI_AGENT) as MockAgent, \
+             patch(_MOD_CREWAI_LLM) as MockLLM, \
+             patch(_MOD_CREWAI_CREW) as MockCrew, \
+             patch(_MOD_CREWAI_TASK) as MockTask:
+            MockAgent.return_value = MagicMock()
+            MockLLM.return_value = MagicMock()
+            MockCrew.return_value = MagicMock()
+            MockTask.return_value = MagicMock()
+            Adapter.build_crewai_object(
+                _make_crew(agents=[agent_model], tasks=[_make_task()])
+            )
+            call_kwargs = MockAgent.call_args[1]
+            assert call_kwargs.get("memory") is True
+
+    def test_crew_memory_config_enabled(self):
+        """Crew MemoryConfig(enabled=True) passes memory=True to Crew."""
+        from crew_engine import Adapter
+
+        crew_model = _make_crew()
+        crew_model.memory = models.MemoryConfig(enabled=True)
+
+        with patch(_MOD_CREWAI_CREW) as MockCrew, \
+             patch(_MOD_CREWAI_AGENT) as MockAgent, \
+             patch(_MOD_CREWAI_LLM) as MockLLM, \
+             patch(_MOD_CREWAI_TASK) as MockTask:
+            MockCrew.return_value = MagicMock()
+            MockAgent.return_value = MagicMock()
+            MockLLM.return_value = MagicMock()
+            MockTask.return_value = MagicMock()
+            Adapter.build_crewai_object(crew_model)
+            call_kwargs = MockCrew.call_args[1]
+            assert call_kwargs.get("memory") is True
+
+    def test_crew_memory_config_disabled(self):
+        """Crew MemoryConfig(enabled=False) does NOT pass memory."""
+        from crew_engine import Adapter
+
+        crew_model = _make_crew()
+        crew_model.memory = models.MemoryConfig(enabled=False)
+
+        with patch(_MOD_CREWAI_CREW) as MockCrew, \
+             patch(_MOD_CREWAI_AGENT) as MockAgent, \
+             patch(_MOD_CREWAI_LLM) as MockLLM, \
+             patch(_MOD_CREWAI_TASK) as MockTask:
+            MockCrew.return_value = MagicMock()
+            MockAgent.return_value = MagicMock()
+            MockLLM.return_value = MagicMock()
+            MockTask.return_value = MagicMock()
+            Adapter.build_crewai_object(crew_model)
+            call_kwargs = MockCrew.call_args[1]
+            assert "memory" not in call_kwargs
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  output_json_schema → Pydantic model tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestOutputJsonSchemaConversion:
+    """JSON schema dict is converted to a Pydantic BaseModel class."""
+
+    def test_simple_schema_creates_model(self):
+        """A basic JSON schema is converted to a Pydantic model."""
+        from crew_engine import _json_schema_to_pydantic_model
+
+        schema = {
+            "type": "object",
+            "title": "ResearchResult",
+            "properties": {
+                "summary": {"type": "string"},
+                "confidence": {"type": "number"},
+                "is_complete": {"type": "boolean"},
+            },
+            "required": ["summary", "confidence"],
+        }
+
+        model = _json_schema_to_pydantic_model(schema)
+        assert issubclass(model, pydantic.BaseModel)
+        assert model.__name__ == "ResearchResult"
+
+        instance = model(summary="test", confidence=0.95, is_complete=True)
+        assert instance.summary == "test"
+        assert instance.confidence == 0.95
+        assert instance.is_complete is True
+
+    def test_optional_fields_work(self):
+        """Fields not in 'required' are Optional."""
+        from crew_engine import _json_schema_to_pydantic_model
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "optional_field": {"type": "string"},
+            },
+            "required": ["name"],
+        }
+
+        model = _json_schema_to_pydantic_model(schema)
+        instance = model(name="required only")
+        assert instance.name == "required only"
+        assert instance.optional_field is None
+
+    def test_output_json_in_task_kwargs(self):
+        """output_json_schema dict is converted to a Pydantic model in kwargs."""
+        from crew_engine import Adapter
+        import pydantic
+
+        task_model = _make_task(name="structured")
+        task_model.output_json_schema = {
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string"},
+            },
+            "required": ["answer"],
+        }
+
+        with patch(_MOD_CREWAI_TASK) as MockTask, \
+             patch(_MOD_CREWAI_AGENT) as MockAgent, \
+             patch(_MOD_CREWAI_LLM) as MockLLM, \
+             patch(_MOD_CREWAI_CREW) as MockCrew:
+            MockTask.return_value = MagicMock()
+            MockAgent.return_value = MagicMock()
+            MockLLM.return_value = MagicMock()
+            MockCrew.return_value = MagicMock()
+            Adapter.build_crewai_object(_make_crew(tasks=[task_model]))
+            call_kwargs = MockTask.call_args[1]
+            output_json = call_kwargs.get("output_json")
+            assert output_json is not None
+            assert isinstance(output_json, type)
+            assert issubclass(output_json, pydantic.BaseModel)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
