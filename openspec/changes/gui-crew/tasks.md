@@ -152,17 +152,17 @@ Chain strategy: **feature-branch-chain**
 
 ### File: `builder.py` (Fase 1 — no canvas sync yet)
 
-- [ ] 1.21 Implement crew configuration form (advanced mode) (~100 LOC, Risk: Med)
+- [x] 1.21 Implement crew configuration form (advanced mode) (~100 LOC, Risk: Med)
   - **Description**: All crew fields: name, process, memory, planning, manager_llm, knowledge_sources, etc. Conditional display of hierarchical fields.
   - **AC**: GIVEN advanced mode active, WHEN filling name="Research Crew" and process="sequential", THEN form validates and saves to `app.storage.user["crew_model"]`.
   - **Deps**: 1.4, 1.8
 
-- [ ] 1.22 Implement agent configuration form with tool selection (~120 LOC, Risk: Med)
+- [x] 1.22 Implement agent configuration form with tool selection (~120 LOC, Risk: Med)
   - **Description**: Role, goal, backstory, llm, function_calling_llm, tools, memory, allow_delegation, etc. Tool multi-select from catalog.
   - **AC**: GIVEN the builder is open, WHEN adding agent "Researcher" and selecting 2 tools, THEN agent appears in crew agent list with correct tool refs.
   - **Deps**: 1.21
 
-- [ ] 1.23 Implement task configuration form with context dependencies (~100 LOC, Risk: Med)
+- [x] 1.23 Implement task configuration form with context dependencies (~100 LOC, Risk: Med)
   - **Description**: Description, expected_output, agent assignment, context (task dependency multi-select), output_file, guardrails, etc.
   - **AC**: GIVEN tasks "Research" and "Write Report", WHEN editing "Write Report" and adding "Research" to context, THEN task model updates and DAG edge is implied.
   - **Deps**: 1.22
