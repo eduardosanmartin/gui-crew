@@ -385,6 +385,27 @@ class CallbackRouter:
         config = config or {}
         filepath = config.get("filepath", "crew_callback.log")
 
+        # Path traversal protection: validate the path
+        from pathlib import Path
+        try:
+            path = Path(filepath)
+            # Only validate relative paths - absolute paths are explicitly provided by user
+            if not path.is_absolute():
+                resolved = path.resolve()
+                cwd = Path.cwd().resolve()
+                # Block relative paths that escape CWD
+                if not str(resolved).startswith(str(cwd)):
+                    CallbackRouter._LOG.warning(
+                        "log_to_file: filepath '%s' resolves outside safe directory, "
+                        "using default 'crew_callback.log'", filepath
+                    )
+                    filepath = "crew_callback.log"
+        except Exception:
+            CallbackRouter._LOG.warning(
+                "log_to_file: invalid filepath '%s', using default", filepath
+            )
+            filepath = "crew_callback.log"
+
         def callback(*args: Any, **kwargs: Any) -> None:
             try:
                 with open(filepath, "a", encoding="utf-8") as fh:
@@ -485,6 +506,14 @@ class CallbackRouter:
                     )
                     continue
 
+                # Validate template_id is a string (unhashable types like lists would crash .get())
+                if not isinstance(template_id, str):
+                    cls._LOG.warning(
+                        "Skipping callback with non-string template_id: %s (type: %s)",
+                        template_id, type(template_id).__name__
+                    )
+                    continue
+
                 factory = cls._TEMPLATES.get(template_id)
                 if factory is not None:
                     try:
@@ -515,6 +544,8 @@ class Adapter:
     When CrewAI evolves, only this file (and potentially the Pydantic models)
     need updating.
     """
+
+    _LOG = logging.getLogger(__name__)
 
     @staticmethod
     def _build_llm(llm_model: models.LLMModel | None) -> Any | None:
@@ -774,6 +805,12 @@ class Adapter:
                 # CrewAI expects a single callable for these
                 elif cb_type in ("step_callback", "task_callback"):
                     if cb_list:
+                        if len(cb_list) > 1:
+                            cls._LOG.warning(
+                                "CrewAI expects a single callable for '%s'; "
+                                "using first of %d callbacks",
+                                cb_type, len(cb_list)
+                            )
                         crew_kwargs[cb_type] = cb_list[0]
                 # Pass through for future CrewAI callback types
                 else:
