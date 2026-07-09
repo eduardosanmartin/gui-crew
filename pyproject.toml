@@ -1,0 +1,20 @@
+[project]
+name = "gui-crew"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "nicegui>=3.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+filterwarnings = [
+    "default",
+]
