@@ -110,32 +110,32 @@ Chain strategy: **feature-branch-chain**
 
 ### File: `crew_engine.py` (Core engine — observability and operations depend on this)
 
-- [ ] 1.13 Implement `Adapter` class: Pydantic → CrewAI object conversion (~100 LOC, Risk: Med)
+- [x] 1.13 Implement `Adapter` class: Pydantic → CrewAI object conversion (~100 LOC, Risk: Med)
   - **Description**: Sole importer of `crewai` package. Converts `CrewModel` → `Crew`, `AgentModel` → `Agent`, etc. Applies `ProgressToolWrapper` to tools.
   - **AC**: GIVEN a valid `CrewModel`, WHEN calling `Adapter.build_crewai_object()`, THEN a CrewAI `Crew` instance is returned with all params mapped. WHEN CrewAI v1.16 changes `Memory` constructor, THEN only this file changes.
   - **Deps**: 1.5
 
-- [ ] 1.14 Implement `BridgeListener(BaseEventListener)` with event protocol mapping (~90 LOC, Risk: Med)
+- [x] 1.14 Implement `BridgeListener(BaseEventListener)` with event protocol mapping (~90 LOC, Risk: Med)
   - **Description**: Registers handlers on `crewai_event_bus` for all event types. Translates CrewAI events → `ProtocolEvent` dicts with `crew_id`.
   - **AC**: GIVEN a synthetic `CrewKickoffStartedEvent`, WHEN `BridgeListener` receives it, THEN it emits `{"type":"crew.started","crew_id":"x",...}`.
   - **Deps**: 1.13
 
-- [ ] 1.15 Implement `CrewEngine.run()` with background thread + `kickoff_async` (~70 LOC, Risk: Med)
+- [x] 1.15 Implement `CrewEngine.run()` with background thread + `kickoff_async` (~70 LOC, Risk: Med)
   - **Description**: Spawns `threading.Thread` wrapping `asyncio.run(crew.kickoff_async())`. Emits events via callback. Checks `flag["stop"]` between chunks.
   - **AC**: GIVEN a crew config and inputs, WHEN calling `engine.run()`, THEN a background thread starts, `kickoff_async` executes, and UI shows "running" without blocking.
   - **Deps**: 1.14
 
-- [ ] 1.16 Implement `CrewEngine.stop()` and cooperative cancellation (~40 LOC, Risk: Med)
+- [x] 1.16 Implement `CrewEngine.stop()` and cooperative cancellation (~40 LOC, Risk: Med)
   - **Description**: Sets `flag["stop"]=True`, joins thread with 5s timeout. Raises `CancelledError` in `ProgressToolWrapper`.
   - **AC**: GIVEN a running crew, WHEN clicking "Stop", THEN `flag["stop"]` becomes True, thread terminates within 5s, and `crew.stopped` event emits.
   - **Deps**: 1.15
 
-- [ ] 1.17 Implement `ProgressToolWrapper` for long-running tool visibility (~60 LOC, Risk: Med)
+- [x] 1.17 Implement `ProgressToolWrapper` for long-running tool visibility (~60 LOC, Risk: Med)
   - **Description**: Wraps CrewAI tools. Emits `tool.progress` every 5s with elapsed_ms and status_message. Checks `flag["stop"]` between emissions.
   - **AC**: GIVEN a tool taking 30s, WHEN executing via `ProgressToolWrapper`, THEN `tool.progress` events emit every 5s. WHEN stop is requested, THEN cancellation happens within 5s.
   - **Deps**: 1.15
 
-- [ ] 1.18 Implement token/cost accounting and `pricing.yaml` loader (~50 LOC, Risk: Low)
+- [x] 1.18 Implement token/cost accounting and `pricing.yaml` loader (~50 LOC, Risk: Low)
   - **Description**: Accumulates tokens from `LLMStreamChunkEvent` + completion events. Calculates cost: `tokens_in * price_in + tokens_out * price_out`.
   - **AC**: GIVEN a completed run with 1k input / 2k output tokens on gpt-4o, WHEN calculating cost, THEN result matches `pricing.yaml` rates within ±5%.
   - **Deps**: 1.15
