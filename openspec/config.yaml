@@ -1,0 +1,43 @@
+schema: spec-driven
+
+context: |
+  Project: gui-crew — Web GUI for CrewAI
+  Stack: Undetermined (greenfield). Target: web GUI covering all CrewAI features.
+  Architecture: Not yet determined. Preference: single-file where reasonable, simple but powerful and elegant.
+  Testing: Not yet configured.
+  Style: Clean, minimalist web GUI.
+
+testing:
+  strict_tdd: false
+  reason: No test runner detected — greenfield project.
+  runner: none
+  unit: false
+  integration: false
+  e2e: false
+  coverage: false
+  linter: false
+  formatter: false
+  type_checker: false
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    - Follow existing code patterns
+    tdd: false
+    test_command: ""
+  verify:
+    test_command: ""
+    build_command: ""
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
