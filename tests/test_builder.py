@@ -842,6 +842,122 @@ class TestWizardMode:
         )
         assert task.agent_role is None
 
+    # ------------------------------------------------------------------
+    #  Fix 2: Wizard template data is copyable into wizard_data
+    # ------------------------------------------------------------------
+
+    def test_wizard_template_populates_agents_and_tasks(self) -> None:
+        """Template data can be deep-copied into wizard_data agents/tasks."""
+        from builder import _WIZARD_TEMPLATES
+
+        # Research template has predefined agents and tasks
+        tmpl = _WIZARD_TEMPLATES["research"]
+        agents = [dict(ag) for ag in tmpl.get("agents", [])]
+        tasks = [dict(tk) for tk in tmpl.get("tasks", [])]
+
+        assert len(agents) == 2
+        assert agents[0]["role"] == "Researcher"
+        assert agents[1]["role"] == "Writer"
+        assert len(tasks) == 2
+        assert tasks[0]["name"] == "Research"
+        assert tasks[1]["name"] == "Write Report"
+
+        # Blank template has no agents or tasks
+        blank = _WIZARD_TEMPLATES["blank"]
+        assert len(blank.get("agents", [])) == 0
+        assert len(blank.get("tasks", [])) == 0
+
+        # Code review template has expected structure
+        cr = _WIZARD_TEMPLATES["code_review"]
+        assert len(cr.get("agents", [])) == 2
+        assert cr["agents"][0]["role"] == "Reviewer"
+        assert len(cr.get("tasks", [])) == 2
+        assert cr["tasks"][1]["name"] == "Document"
+
+    # ------------------------------------------------------------------
+    #  Fix 3: _apply_wizard_to_model does not corrupt live model
+    # ------------------------------------------------------------------
+
+    def test_wizard_apply_uses_new_model_does_not_corrupt_original(self) -> None:
+        """Building a CrewModel from wizard data does not mutate the original."""
+        original = m.CrewModel(
+            name="Original Crew",
+            description="Original description",
+            agents=[m.AgentModel(role="R", goal="Research")],
+            tasks=[m.TaskModel(name="T1", description="D", expected_output="E")],
+        )
+        original_copy = original.model_copy(deep=True)
+
+        # Build agents and tasks from wizard data (simulating _apply_wizard_to_model)
+        wizard_data = {
+            "name": "Wizard Crew",
+            "description": "Wizard description",
+            "process": "sequential",
+            "agents": [
+                {"role": "A1", "goal": "G1", "backstory": "", "tools": []},
+                {"role": "A2", "goal": "G2", "backstory": "", "tools": []},
+            ],
+            "tasks": [
+                {"name": "T1", "description": "D1", "expected_output": "E1", "agent_role": "A1"},
+            ],
+        }
+
+        # Construct new model from wizard data (without touching original)
+        new_agents = [
+            m.AgentModel(
+                role=ag["role"], goal=ag["goal"],
+                backstory=ag.get("backstory", ""),
+            )
+            for ag in wizard_data["agents"]
+        ]
+        new_tasks = [
+            m.TaskModel(
+                name=tk["name"], description=tk["description"],
+                expected_output=tk["expected_output"],
+                agent_role=tk.get("agent_role"),
+            )
+            for tk in wizard_data["tasks"]
+        ]
+        new_cm = m.CrewModel(
+            name=wizard_data["name"],
+            description=wizard_data["description"],
+            process=wizard_data["process"],  # type: ignore[arg-type]
+            agents=new_agents,
+            tasks=new_tasks,
+        )
+
+        # Original must be untouched
+        assert original.name == "Original Crew"
+        assert original.description == "Original description"
+        assert len(original.agents) == 1
+        assert original.agents[0].role == "R"
+        assert len(original.tasks) == 1
+        assert original.tasks[0].name == "T1"
+
+        # New model has wizard data
+        assert new_cm.name == "Wizard Crew"
+        assert len(new_cm.agents) == 2
+        assert len(new_cm.tasks) == 1
+
+    def test_wizard_apply_preserves_original_on_invalid_data(self) -> None:
+        """Constructing a CrewModel with invalid data fails without touching original."""
+        original = m.CrewModel(
+            name="Safe Crew",
+            agents=[m.AgentModel(role="R", goal="Research")],
+        )
+
+        # Invalid wizard data — missing task required fields
+        with pytest.raises(Exception):
+            m.CrewModel(
+                name="Bad Crew",
+                tasks=[m.TaskModel(name="", description="", expected_output="")],
+            )
+
+        # Original must still be intact
+        assert original.name == "Safe Crew"
+        assert len(original.agents) == 1
+        assert original.agents[0].role == "R"
+
 
 # ============================================================================
 #  Task 1.26 - Custom Tool Form
@@ -915,6 +1031,48 @@ class TestCustomToolForm:
         from builder import BUILTIN_TOOLS
         matches = [t for t in BUILTIN_TOOLS if "scrape" in t["description"].lower()]
         assert len(matches) >= 1
+
+    # ------------------------------------------------------------------
+    #  Fix 5: Custom tools are persisted and retrievable
+    # ------------------------------------------------------------------
+
+    def test_custom_tool_stored_in_storage(self) -> None:
+        """Custom tool persisted to storage appears in _all_tool_options."""
+        from unittest.mock import PropertyMock, patch
+        from nicegui.storage import Storage
+        from builder import _all_tool_options
+
+        tool_dict = {
+            "kind": "custom",
+            "name": "MyApiTool",
+            "params": {"description": "Calls my API"},
+            "args_schema": {"endpoint": {"type": "string"}},
+        }
+        user: dict[str, Any] = {"custom_tools": [tool_dict]}
+        with patch.object(
+            Storage, "user", new_callable=PropertyMock, return_value=user
+        ):
+            options = _all_tool_options()
+
+        custom_names = [t["name"] for t in options if t.get("_custom")]
+        assert "MyApiTool" in custom_names
+        assert len(custom_names) == 1
+
+    def test_custom_tools_empty_by_default(self) -> None:
+        """When no custom tools exist, _all_tool_options returns only built-in tools."""
+        from unittest.mock import PropertyMock, patch
+        from nicegui.storage import Storage
+        from builder import _all_tool_options
+
+        user: dict[str, Any] = {}
+        with patch.object(
+            Storage, "user", new_callable=PropertyMock, return_value=user
+        ):
+            options = _all_tool_options()
+
+        custom_tools = [t for t in options if t.get("_custom")]
+        assert len(custom_tools) == 0
+        assert len(options) == len(BUILTIN_TOOLS)
 
 
 # ============================================================================

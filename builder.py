@@ -51,6 +51,20 @@ BUILTIN_TOOLS: list[dict[str, str]] = [
 logger = logging.getLogger(__name__)
 
 
+def _all_tool_options() -> list[dict[str, str]]:
+    """Return combined built-in and custom tool options for selectors."""
+    custom = app.storage.user.get("custom_tools", [])
+    result = list(BUILTIN_TOOLS)
+    for ct in custom:
+        desc = (
+            ct.get("params", {}).get("description", "")
+            if isinstance(ct.get("params"), dict)
+            else ""
+        )
+        result.append({"name": ct["name"], "description": desc, "_custom": "1"})
+    return result
+
+
 def _crew_model() -> m.CrewModel:
     """Return the current crew model from session storage.
 
@@ -300,10 +314,13 @@ def _render_agent_list(cm: m.CrewModel) -> None:
             agent_tool_names = {t.name for t in edit_agent.tools}
             tool_selections: dict[str, bool] = {}
             with ui.column().classes("q-gutter-xs w-full"):
-                for tool_info in BUILTIN_TOOLS:
+                for tool_info in _all_tool_options():
                     tname = tool_info["name"]
+                    label = f"{tname} - {tool_info['description']}"
+                    if tool_info.get("_custom"):
+                        label += " (custom)"
                     tool_selections[tname] = ui.checkbox(
-                        f"{tname} - {tool_info['description']}",
+                        label,
                         value=tname in agent_tool_names,
                     )
 
@@ -357,11 +374,6 @@ def _render_agent_list(cm: m.CrewModel) -> None:
                     title=f"Memory for {edit_agent.role or 'Agent'}",
                 ),
             ).props("flat")
-
-            # Variable interpolation preview for goal and backstory
-            cm_agent = _crew_model()
-            if cm_agent.inputs and (cm_agent.role != edit_agent.role):
-                pass  # preview works off crew-level inputs
 
             def _save_agent() -> None:
                 nonlocal edit_agent
@@ -533,10 +545,13 @@ def _render_task_list(cm: m.CrewModel) -> None:
             task_tool_names = {t.name for t in edit_task.tools}
             task_tool_selections: dict[str, ui.checkbox] = {}
             with ui.column().classes("q-gutter-xs w-full"):
-                for tool_info in BUILTIN_TOOLS:
+                for tool_info in _all_tool_options():
                     tname = tool_info["name"]
+                    label = tname
+                    if tool_info.get("_custom"):
+                        label += " (custom)"
                     task_tool_selections[tname] = ui.checkbox(
-                        f"{tname}",
+                        label,
                         value=tname in task_tool_names,
                     )
 
@@ -710,10 +725,15 @@ def _open_custom_tool_dialog() -> None:
                 params={"description": desc_val} if desc_val else {},
                 args_schema=schema_val,
             )
-            ui.notify(f"Custom tool '{name_val}' created. Add it to an agent in the Agents tab.", type="positive")
+            # Persist to storage so tool selectors can find it
+            custom_tools = app.storage.user.get("custom_tools", [])
+            custom_tools.append(tool_ref.model_dump())
+            app.storage.user["custom_tools"] = custom_tools
+            ui.notify(
+                f"Custom tool '{name_val}' created. It is now available in the agent/task tool selectors.",
+                type="positive",
+            )
             dialog.close()
-            # Note: custom tools are created but not automatically added to agents.
-            # Users must manually add them via the agent form's tool selector.
 
         with ui.row().classes("justify-end q-gutter-sm q-mt-md"):
             ui.button("Cancel", on_click=dialog.close).props(
@@ -887,15 +907,15 @@ def _render_knowledge_sub_form(
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
         ui.label("Knowledge Sources").classes(THEME.typography.SECTION_TITLE)
 
-        # Build editable rows for existing knowledge sources
-        source_rows: list[dict[str, Any]] = []
+        # Store plain data only — no UI elements in source_rows
+        source_rows: list[dict[str, Any]] = [
+            {"name": src.get("name", ""), "kind": src.get("kind", "text")}
+            for src in existing
+        ]
         sources_list = ui.column().classes("w-full q-gutter-sm")
 
         def _add_source() -> None:
-            row = {"name": _full_input(label="Source Name", value=""), "kind": _full_select(
-                label="Kind", options=["string", "text", "pdf"], value="text",
-            )}
-            source_rows.append(row)
+            source_rows.append({"name": "", "kind": "text"})
             _refresh_sources()
 
         def _refresh_sources() -> None:
@@ -905,11 +925,11 @@ def _render_knowledge_sub_form(
                     with ui.card().props(THEME.component.CARD["props"]).classes("w-full"):
                         with ui.row().classes("items-center justify-between w-full"):
                             row["name"] = _full_input(
-                                label="Source Name", value=row["name"].value,
+                                label="Source Name", value=row["name"],
                             )
                             row["kind"] = _full_select(
                                 label="Kind", options=["string", "text", "pdf"],
-                                value=row["kind"].value,
+                                value=row["kind"],
                             )
                             ui.button(
                                 icon="delete", on_click=lambda idx=i: _remove_source(idx),
@@ -918,17 +938,6 @@ def _render_knowledge_sub_form(
         def _remove_source(idx: int) -> None:
             del source_rows[idx]
             _refresh_sources()
-
-        # Initialize with existing sources
-        for src in existing:
-            row = {
-                "name": _full_input(label="Source Name", value=src.get("name", "")),
-                "kind": _full_select(
-                    label="Kind", options=["string", "text", "pdf"],
-                    value=src.get("kind", "text"),
-                ),
-            }
-            source_rows.append(row)
 
         _refresh_sources()
 
@@ -1189,6 +1198,12 @@ def _render_wizard() -> None:
                 }
                 template_desc.set_text(descriptions.get(sel, descriptions["blank"]))
                 wizard_data["template"] = sel
+                # Populate agents/tasks from the selected template
+                tmpl = _WIZARD_TEMPLATES.get(sel, _WIZARD_TEMPLATES["blank"])
+                wizard_data["agents"] = [dict(ag) for ag in tmpl.get("agents", [])]
+                wizard_data["tasks"] = [dict(tk) for tk in tmpl.get("tasks", [])]
+                _wizard_agent_list.refresh()
+                _wizard_task_list.refresh()
 
             template_select.on("update:model-value", lambda _: _update_template_desc())
 
@@ -1257,9 +1272,12 @@ def _render_wizard() -> None:
                     tool_checks: dict[str, ui.checkbox] = {}
                     ui.label("Tools (optional):").classes("text-body2 q-mt-sm")
                     with ag_tools_list:
-                        for tool_info in BUILTIN_TOOLS:
+                        for tool_info in _all_tool_options():
+                            label = tool_info["name"]
+                            if tool_info.get("_custom"):
+                                label += " (custom)"
                             tool_checks[tool_info["name"]] = ui.checkbox(
-                                tool_info["name"], value=False,
+                                label, value=False,
                             )
 
                     def _save_wiz_agent() -> None:
@@ -1417,41 +1435,56 @@ def _render_wizard() -> None:
                 ui.label(f"• {tk['name']} → {tk.get('agent_role', 'unassigned')}").classes("text-body2")
 
     def _apply_wizard_to_model() -> None:
-        """Convert wizard data back to CrewModel and persist."""
-        cm.name = wizard_data["name"]
-        cm.description = wizard_data["description"]
-        cm.process = wizard_data["process"]  # type: ignore[assignment]
+        """Convert wizard data back to CrewModel and persist.
 
-        # Apply template if selected
-        template = wizard_data.get("template", "blank")
-
+        Builds a new CrewModel from wizard data, validates + persists it,
+        and only mutates the live ``cm`` on success — never corrupts
+        the in-memory model on validation failure.
+        """
         # Build agents from wizard data
-        cm.agents.clear()
-        for ag_data in wizard_data["agents"]:
-            tools = [
-                m.ToolRef(kind="builtin", name=tn)
-                for tn in ag_data.get("tools", [])
-            ]
-            agent = m.AgentModel(
+        agents = [
+            m.AgentModel(
                 role=ag_data["role"],
                 goal=ag_data["goal"],
                 backstory=ag_data.get("backstory", ""),
-                tools=tools,
+                tools=[
+                    m.ToolRef(kind="builtin", name=tn)
+                    for tn in ag_data.get("tools", [])
+                ],
             )
-            cm.agents.append(agent)
+            for ag_data in wizard_data["agents"]
+        ]
 
         # Build tasks from wizard data
-        cm.tasks.clear()
-        for tk_data in wizard_data["tasks"]:
-            task = m.TaskModel(
+        tasks = [
+            m.TaskModel(
                 name=tk_data["name"],
                 description=tk_data["description"],
                 expected_output=tk_data["expected_output"],
                 agent_role=tk_data.get("agent_role"),
             )
-            cm.tasks.append(task)
+            for tk_data in wizard_data["tasks"]
+        ]
 
-        _persist(cm)
+        # Build new CrewModel and persist — validates everything
+        new_cm = m.CrewModel(
+            name=wizard_data["name"],
+            description=wizard_data["description"],
+            process=wizard_data["process"],  # type: ignore[arg-type]
+            agents=agents,
+            tasks=tasks,
+        )
+        if _persist(new_cm) != 0:
+            return  # error notification handled inside _persist
+
+        # Only mutate live cm on success
+        cm.name = new_cm.name
+        cm.description = new_cm.description
+        cm.process = new_cm.process  # type: ignore[assignment]
+        cm.agents.clear()
+        cm.agents.extend(new_cm.agents)
+        cm.tasks.clear()
+        cm.tasks.extend(new_cm.tasks)
         ui.notify(
             f"Crew '{cm.name}' saved! Switch to Advanced mode for detailed editing.",
             type="positive",
