@@ -159,9 +159,11 @@ def builder() -> None:
 
 
 @ui.page("/canvas")
-def canvas() -> None:
+def canvas_page() -> None:
     """Canvas view — DAG editor for visual crew topology."""
-    render_page("Canvas", _render_canvas_placeholder)
+    import canvas as _canvas
+
+    render_page("Canvas", _canvas.render_canvas)
 
 
 @ui.page("/observability")

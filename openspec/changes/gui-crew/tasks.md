@@ -252,42 +252,42 @@ Chain strategy: **feature-branch-chain**
 
 ### File: `canvas.py`
 
-- [ ] 2.1 Implement canvas rendering: absolute-position Quasar cards + SVG edges (~100 LOC, Risk: Med)
+- [x] 2.1 Implement canvas rendering: absolute-position Quasar cards + SVG edges (~100 LOC, Risk: Med)
   - **Description**: Custom Vue/Quasar nodes via `ui.element` q-card proxies. SVG edges between nodes. No external JS dependency.
   - **AC**: GIVEN a crew with 2 agents and 2 tasks, WHEN opening canvas, THEN 4 nodes render with distinct shapes and edges connect related nodes.
   - **Deps**: 1.4, 1.8
 
-- [ ] 2.2 Implement node palette and drag-and-drop (~60 LOC, Risk: Med)
+- [x] 2.2 Implement node palette and drag-and-drop (~60 LOC, Risk: Med)
   - **Description**: Sidebar palette with Agent and Task node types. Drag onto canvas creates node at drop position.
   - **AC**: GIVEN the canvas is empty, WHEN dragging an "Agent" node from palette onto canvas, THEN a new agent node appears at drop position with placeholder name.
   - **Deps**: 2.1
 
-- [ ] 2.3 Implement edge creation with output/input handles (~60 LOC, Risk: Med)
+- [x] 2.3 Implement edge creation with output/input handles (~60 LOC, Risk: Med)
   - **Description**: Drag from node output handle to another node's input handle. Self-connect rejected with tooltip.
   - **AC**: GIVEN two task nodes "Research" and "Write", WHEN dragging from Research output to Write input, THEN a directed edge appears and Write's context updates.
   - **Deps**: 2.2
 
-- [ ] 2.4 Implement node/edge CRUD with confirmation dialogs (~50 LOC, Risk: Low)
+- [x] 2.4 Implement node/edge CRUD with confirmation dialogs (~50 LOC, Risk: Low)
   - **Description**: Select node + Delete key or remove button. Confirmation if node has edges. Deleting agent with assigned tasks shows warning.
   - **AC**: GIVEN a node with 2 connected edges, WHEN clicking remove, THEN a confirmation dialog appears. WHEN confirmed, THEN node and edges are removed.
   - **Deps**: 2.3
 
-- [ ] 2.5 Implement auto-layout algorithm (~60 LOC, Risk: Med)
+- [x] 2.5 Implement auto-layout algorithm (~60 LOC, Risk: Med)
   - **Description**: Top-down hierarchical layout. Root tasks at top, leaves at bottom. Minimize edge crossings.
   - **AC**: GIVEN scattered nodes, WHEN clicking "Auto-layout", THEN nodes rearrange into top-down flow with clear hierarchy.
   - **Deps**: 2.4
 
-- [ ] 2.6 Implement zoom/pan controls and fit-to-screen (~40 LOC, Risk: Low)
+- [x] 2.6 Implement zoom/pan controls and fit-to-screen (~40 LOC, Risk: Low)
   - **Description**: Zoom 25%–200%. Pan by dragging canvas background. Fit-to-screen button.
   - **AC**: GIVEN 20 nodes on canvas, WHEN zooming to 50%, THEN all nodes scale. WHEN clicking fit-to-screen, THEN all nodes are visible in viewport.
   - **Deps**: 2.1
 
-- [ ] 2.7 Implement DAG validation with visual error highlighting (~50 LOC, Risk: Med)
+- [x] 2.7 Implement DAG validation with visual error highlighting (~50 LOC, Risk: Med)
   - **Description**: Cycle detection on edge creation. Invalid edges highlighted red. Error message shows cycle path.
   - **AC**: GIVEN tasks A→B→C, WHEN adding edge C→A, THEN the edge is highlighted red and tooltip shows "Circular dependency: A → B → C → A".
   - **Deps**: 2.3
 
-- [ ] 2.8 Implement undo/redo stack (minimum 50 steps) (~60 LOC, Risk: Med)
+- [x] 2.8 Implement undo/redo stack (minimum 50 steps) (~60 LOC, Risk: Med)
   - **Description**: Record every mutation (add/remove/move/edge). Ctrl+Z / Ctrl+Shift+Z.
   - **AC**: GIVEN a canvas with changes, WHEN pressing Ctrl+Z, THEN last change reverses. WHEN pressing Ctrl+Shift+Z, THEN change re-applies.
   - **Deps**: 2.2

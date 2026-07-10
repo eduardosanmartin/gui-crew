@@ -9,7 +9,16 @@ Web GUI for complete CrewAI coverage.
 ## Features
 
 - **Builder**: Visual configuration forms for crews, agents, tasks, tools, memory, LLMs
-- **Canvas**: DAG editor for visual topology (n8n-style)
+- **Canvas**: DAG editor for visual crew topology editing
+  - Agent (circle) and task (rectangle) nodes with SVG edge connections
+  - Node palette for adding agents/tasks to the canvas
+  - Click-based edge creation with cycle detection
+  - Node/edge CRUD with delete confirmation dialogs
+  - Auto-layout: top-down hierarchical algorithm via topological sort
+  - Zoom controls (25%–200%) with fit-to-screen button
+  - Real-time DAG validation with cycle highlighting in red
+  - Undo/redo stack (50-step) with snapshot-based state management
+  - Bidirectional sync with Builder via shared `CrewModel`
 - **Observability**: Real-time execution dashboard with 3 layers (macro/meso/micro)
 - **Operations**: Playground, templates, history, import/export
 
@@ -49,7 +58,9 @@ python app.py
 
 - [x] PR 1a: Pydantic models with CrewAI serialization (105 tests passing)
 - [x] PR 1b: styles.py + app.py shell (69 tests passing)
-- [ ] PR 2a: crew_engine.py Adapter + BridgeListener
+- [x] PR 2a: crew_engine.py Adapter + BridgeListener (92 tests passing)
+- [x] PR 2b: crew_engine.py run/stop + ProgressToolWrapper + callbacks
+- [x] PR 8 / PR 9: canvas.py DAG editor (76 tests passing)
 - [ ] ... (13 PRs total)
 
 ## License
