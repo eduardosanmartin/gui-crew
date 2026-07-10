@@ -197,6 +197,42 @@ class TestHistoryPersistence:
         assert _safe_filename("  spaces  ") == "spaces"
         assert _safe_filename("") == "unknown"
 
+    def test_concurrent_save_does_not_overwrite(self, tmp_path: Path):
+        """Two records with the same timestamp get different filenames."""
+        ts = datetime(2025, 7, 9, 12, 0, 0, 123456, tzinfo=timezone.utc)
+        r1 = self._make_record(crew_name="Concurrent")
+        r2 = self._make_record(crew_name="Concurrent")
+
+        # Override timestamps to be identical
+        r1.timestamp = ts
+        r2.timestamp = ts
+
+        f1 = save_run_record(r1, base_dir=str(tmp_path))
+        f2 = save_run_record(r2, base_dir=str(tmp_path))
+
+        assert f1 != f2, "Concurrent saves must produce different filenames"
+        assert f1.exists()
+        assert f2.exists()
+
+    def test_save_with_identical_timestamp_no_collision(self, tmp_path: Path):
+        """Pre-existing file with same timestamp must not be overwritten."""
+        ts = datetime(2025, 7, 9, 12, 0, 0, 654321, tzinfo=timezone.utc)
+        record = self._make_record(crew_name="CollisionTest")
+        record.timestamp = ts
+
+        # Pre-create a file at the expected base path
+        crew_dir = tmp_path / "CollisionTest"
+        crew_dir.mkdir(parents=True)
+        ts_base = ts.strftime("%Y%m%d_%H%M%S_%f")
+        pre_existing = crew_dir / f"{ts_base}.json"
+        pre_existing.write_text("{}")
+
+        # Saving should pick a different filename (not crash, not overwrite)
+        filepath = save_run_record(record, base_dir=str(tmp_path))
+        assert filepath != pre_existing
+        assert pre_existing.read_text() == "{}"  # original intact
+        assert filepath.exists()
+
 
 # ═══════════════════════════════════════════════
 #  History Filtering  (Task 2.12)
@@ -306,6 +342,49 @@ class TestHistoryFiltering:
         # Should be in original order (newer last, based on timestamp of creation)
         assert result[0].duration_ms == 3000
         assert result[1].duration_ms == 4000
+
+    def test_filter_mixed_naive_and_aware_datetimes(self):
+        """Mixed naive/aware datetimes must not raise ``TypeError``."""
+        records = self._make_records()
+        # Use naive datetime for the filter
+        result = filter_history(
+            records,
+            date_from=datetime(2025, 7, 2),  # naive — no tzinfo
+        )
+        # All records have tzinfo=utc; naive input is assumed UTC → >= July 2
+        assert len(result) == 3
+
+    def test_filter_naive_filter_with_naive_records(self):
+        """Both sides naive should still work."""
+        naive_records = [
+            models.RunRecord(
+                crew_name="C",
+                crew_snapshot={},
+                timestamp=datetime(2025, 6, 1),  # naive
+                status="success",
+            ),
+            models.RunRecord(
+                crew_name="C",
+                crew_snapshot={},
+                timestamp=datetime(2025, 7, 1),  # naive
+                status="success",
+            ),
+        ]
+        result = filter_history(
+            naive_records,
+            date_from=datetime(2025, 6, 15),  # naive
+        )
+        assert len(result) == 1
+        assert result[0].timestamp == datetime(2025, 7, 1)
+
+    def test_filter_both_aware_unchanged_behavior(self):
+        """Aware + aware comparisons still behave correctly."""
+        records = self._make_records()
+        result = filter_history(
+            records,
+            date_from=datetime(2025, 7, 3, tzinfo=timezone.utc),
+        )
+        assert len(result) == 2
 
 
 # ═══════════════════════════════════════════════
@@ -681,6 +760,61 @@ class TestJsoncCommentStripping:
         parsed = json.loads(result)
         assert parsed["name"] == "test"
         assert parsed["value"] == 42
+
+    def test_preserve_block_comment_inside_string(self):
+        """``/* not a comment */`` inside a string value must NOT be stripped."""
+        content = '''{
+    "pattern": "/*not a comment*/",
+    "key": "value"
+}'''
+        result = _strip_jsonc_comments(content)
+        assert '"/*not a comment*/"' in result
+        # It should also still be valid JSON
+        parsed = json.loads(result)
+        assert parsed["pattern"] == "/*not a comment*/"
+        assert parsed["key"] == "value"
+
+    def test_preserve_escaped_quote_inside_string(self):
+        """Strings with escaped quotes must not confuse the state machine."""
+        content = '''{
+    "text": "he said \\"hello world\\"",
+    "key": "value"
+}'''
+        result = _strip_jsonc_comments(content)
+        assert '"key": "value"' in result
+        # Valid JSON after stripping
+        parsed = json.loads(result)
+        assert parsed["text"] == 'he said "hello world"'
+        assert parsed["key"] == "value"
+
+    def test_preserve_escaped_backslash_before_quote(self):
+        """``\\\\\\"`` (escaped backslash + quote) must not close the string."""
+        content = '''{
+    "path": "C:\\\\\\\\",
+    "key": "value"
+}'''
+        result = _strip_jsonc_comments(content)
+        assert '"key": "value"' in result
+        parsed = json.loads(result)
+        assert parsed["path"] == "C:\\\\"
+        assert parsed["key"] == "value"
+
+    def test_mixed_comments_and_strings_with_slashes(self):
+        """Line comment must be removed; ``//`` and ``/*`` inside strings preserved."""
+        content = '''{
+    // this is a real comment
+    "regex": "http://example.com",
+    "code": "x = a/*b",
+    "keep": true
+}'''
+        result = _strip_jsonc_comments(content)
+        assert "// this is a real comment" not in result
+        assert '"regex": "http://example.com"' in result
+        assert '"code": "x = a/*b"' in result
+        parsed = json.loads(result)
+        assert parsed["regex"] == "http://example.com"
+        assert parsed["code"] == "x = a/*b"
+        assert parsed["keep"] is True
 
 
 # ═══════════════════════════════════════════════

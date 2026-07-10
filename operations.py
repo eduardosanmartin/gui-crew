@@ -214,25 +214,33 @@ def save_run_record(
     crew_dir = base / _safe_filename(record.crew_name)
     crew_dir.mkdir(parents=True, exist_ok=True)
 
-    ts_base = record.timestamp.strftime("%Y%m%d_%H%M%S_%f")
-    # Avoid overwriting when multiple records share the same timestamp
-    filename = f"{ts_base}.json"
-    counter = 1
-    filepath = crew_dir / filename
-    while filepath.exists():
-        filename = f"{ts_base}_{counter:03d}.json"
-        filepath = crew_dir / filename
-        counter += 1
+    import secrets
 
-    filepath.write_text(
-        json.dumps(
-            record.model_dump(mode="json"),
-            indent=2,
-            ensure_ascii=False,
-            default=str,
-        ),
-        encoding="utf-8",
-    )
+    ts_base = record.timestamp.strftime("%Y%m%d_%H%M%S_%f")
+    # Atomic filename: use exclusive-create (``x`` mode) with a retry loop
+    # so concurrent calls never clobber each other.
+    content = json.dumps(
+        record.model_dump(mode="json"),
+        indent=2,
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
+
+    for attempt in range(100):
+        suffix = f"_{secrets.token_hex(4)}" if attempt > 0 else ""
+        filename = f"{ts_base}{suffix}.json"
+        filepath = crew_dir / filename
+        try:
+            with open(filepath, "xb") as f:
+                f.write(content)
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise RuntimeError(
+            f"Could not create unique filename in {crew_dir} "
+            f"after 100 attempts"
+        )
     _LOG.info("Saved run record to %s", filepath)
     return filepath
 
@@ -269,6 +277,13 @@ def load_history(
     return records
 
 
+def _as_utc(dt: datetime) -> datetime:
+    """Normalise a datetime to UTC, assuming UTC for naive values."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def filter_history(
     records: list[models.RunRecord],
     *,
@@ -303,10 +318,17 @@ def filter_history(
         result = [r for r in result if cname_lower in r.crew_name.lower()]
     if status:
         result = [r for r in result if r.status == status]
-    if date_from:
-        result = [r for r in result if r.timestamp >= date_from]
-    if date_to:
-        result = [r for r in result if r.timestamp <= date_to]
+    if date_from is not None or date_to is not None:
+        # Normalise both sides to UTC so mixed naive/aware datetimes
+        # never raise ``TypeError``.  Naive inputs are assumed UTC.
+        d_from = _as_utc(date_from) if date_from else date_from
+        d_to = _as_utc(date_to) if date_to else date_to
+
+        result = [
+            r for r in result
+            if (d_from is None or _as_utc(r.timestamp) >= d_from)
+            and (d_to is None or _as_utc(r.timestamp) <= d_to)
+        ]
     return result
 
 
@@ -421,22 +443,79 @@ def _strip_bom(text: str) -> str:
 
 
 def _strip_jsonc_comments(text: str) -> str:
-    """Remove ``//`` line comments and ``/* */`` block comments from JSONC."""
-    # Remove block comments first (they can span lines)
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-    # Remove line comments (but not URLs with //)
-    lines = []
-    for line in text.splitlines():
-        # Simple heuristic: // at start or after whitespace with "
-        in_string = False
-        for i, ch in enumerate(line):
-            if ch == '"' and (i == 0 or line[i - 1] != "\\"):
-                in_string = not in_string
-            elif ch == "/" and not in_string and i + 1 < len(line) and line[i + 1] == "/":
-                line = line[:i]
-                break
-        lines.append(line)
-    return "\n".join(lines)
+    """Remove ``//`` line comments and ``/* */`` block comments from JSONC.
+
+    Uses a single-pass state machine that tracks string boundaries and
+    escape sequences (``\\``, ``\\"``) so that ``//`` and ``/*`` inside
+    strings are never mistaken for comments.
+    """
+    result: list[str] = []
+    i = 0
+    length = len(text)
+    in_string = False
+    in_block = False
+    escape = False
+
+    while i < length:
+        ch = text[i]
+
+        # --- inside a block comment: consume until */ ---
+        if in_block:
+            if ch == "*" and i + 1 < length and text[i + 1] == "/":
+                in_block = False
+                i += 2
+                continue
+            i += 1
+            continue
+
+        # --- inside a string literal: handle escapes carefully ---
+        if in_string:
+            if escape:
+                escape = False
+                result.append(ch)
+                i += 1
+                continue
+            if ch == "\\":
+                escape = True
+                result.append(ch)
+                i += 1
+                continue
+            if ch == '"':
+                in_string = False
+                result.append(ch)
+                i += 1
+                continue
+            result.append(ch)
+            i += 1
+            continue
+
+        # --- outside string / block comment ---
+        if ch == '"':
+            in_string = True
+            result.append(ch)
+            i += 1
+            continue
+
+        if ch == "/" and i + 1 < length:
+            if text[i + 1] == "/":
+                # Line comment: skip to end of line
+                i += 2
+                while i < length and text[i] != "\n":
+                    i += 1
+                if i < length and text[i] == "\n":
+                    result.append("\n")
+                    i += 1
+                continue
+            if text[i + 1] == "*":
+                # Block comment: skip until */
+                in_block = True
+                i += 2
+                continue
+
+        result.append(ch)
+        i += 1
+
+    return "".join(result)
 
 
 # ============================================================================
@@ -666,6 +745,7 @@ def _render_history() -> None:
 
     rows = [
         {
+            "key": r.timestamp.isoformat(),  # unique row identifier
             "date": r.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             "crew": r.crew_name,
             "status": r.status,
@@ -680,7 +760,7 @@ def _render_history() -> None:
         ui.table(
             columns=columns,
             rows=rows,
-            row_key="date",
+            row_key="key",
             selection="multiple",
         )
         .classes("w-full")
@@ -693,7 +773,8 @@ def _render_history() -> None:
         if not selected or len(selected) != 2:
             ui.notify("Select exactly 2 runs to compare.", type="warning")
             return
-        _show_comparison(all_records, selected)
+        selected_keys = [row[history_table.row_key] for row in selected]
+        _show_comparison(all_records, selected_keys)
 
     ui.button(
         "Compare Selected",
@@ -716,6 +797,7 @@ def _apply_history_filters(
     )
     table.rows = [
         {
+            "key": r.timestamp.isoformat(),
             "date": r.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             "crew": r.crew_name,
             "status": r.status,
@@ -740,6 +822,7 @@ def _clear_history_filters(
     status_select.value = ""
     table.rows = [
         {
+            "key": r.timestamp.isoformat(),
             "date": r.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             "crew": r.crew_name,
             "status": r.status,
@@ -757,11 +840,11 @@ def _show_comparison(
     selected_keys: list[str],
 ) -> None:
     """Open a side-by-side comparison dialog for two runs."""
-    # Find the selected records by matching date strings
+    # Find the selected records by matching unique timestamp keys
     found: list[models.RunRecord] = []
     for key in selected_keys:
         for r in records:
-            if r.timestamp.strftime("%Y-%m-%d %H:%M:%S") == key:
+            if r.timestamp.isoformat() == key:
                 found.append(r)
                 break
 
