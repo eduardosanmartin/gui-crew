@@ -919,6 +919,12 @@ def _render_knowledge_sub_form(
             _refresh_sources()
 
         def _refresh_sources() -> None:
+            # Extract current values from UI elements before destroying them
+            for row in source_rows:
+                if hasattr(row["name"], "value"):
+                    row["name"] = row["name"].value or ""
+                if hasattr(row["kind"], "value"):
+                    row["kind"] = row["kind"].value or "text"
             sources_list.clear()
             with sources_list:
                 for i, row in enumerate(source_rows):

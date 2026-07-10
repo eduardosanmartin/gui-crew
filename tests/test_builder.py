@@ -16,6 +16,7 @@ a full NiceGUI server context.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock, PropertyMock, patch
 
@@ -734,6 +735,73 @@ class TestKnowledgeSubForm:
         """Knowledge sources default to empty list."""
         cm = m.CrewModel(name="No KS")
         assert cm.knowledge_sources == []
+
+    def test_knowledge_sources_multiple_refresh(self) -> None:
+        """Multiple _refresh_sources calls preserve field values (regression)."""
+        existing: list[dict[str, Any]] = [
+            {"name": "Source A", "kind": "text"},
+            {"name": "Source B", "kind": "pdf"},
+        ]
+
+        # Track values passed to _full_input / _full_select on each refresh
+        input_values: list[Any] = []
+        select_values: list[Any] = []
+        button_callbacks: dict[str, Callable[[], None]] = {}
+
+        def _tracking_input(**kw: Any) -> MagicMock:
+            if "value" in kw:
+                input_values.append(kw["value"])
+            mock = MagicMock()
+            mock.value = kw.get("value", "")
+            return mock
+
+        def _tracking_select(**kw: Any) -> MagicMock:
+            if "value" in kw:
+                select_values.append(kw["value"])
+            mock = MagicMock()
+            mock.value = kw.get("value", "text")
+            return mock
+
+        def _tracking_button(text: str = "", **kw: Any) -> MagicMock:
+            if text and "on_click" in kw:
+                button_callbacks[text] = kw["on_click"]
+            return MagicMock()
+
+        with (
+            patch("builder.ui.dialog") as mock_dialog,
+            patch("builder.ui.card"),
+            patch("builder.ui.label"),
+            patch("builder.ui.row"),
+            patch("builder.ui.column"),
+            patch("builder.ui.button", side_effect=_tracking_button),
+            patch("builder._full_input", side_effect=_tracking_input),
+            patch("builder._full_select", side_effect=_tracking_select),
+        ):
+            mock_dialog.return_value.__enter__.return_value = MagicMock()
+            mock_dialog.return_value.__exit__.return_value = None
+
+            on_save = MagicMock()
+            builder._render_knowledge_sub_form(existing, on_save)
+
+            # First refresh: 2 sources → 2 input + 2 select calls
+            assert input_values == ["Source A", "Source B"]
+            assert select_values == ["text", "pdf"]
+
+            # Simulate adding a source — triggers second _refresh_sources
+            add_callback = button_callbacks.get("+ Add Source")
+            assert add_callback is not None, "Add Source button callback not captured"
+
+            input_values.clear()
+            select_values.clear()
+            add_callback()
+
+            # Second refresh: 3 sources with preserved values
+            assert input_values == [
+                "Source A", "Source B", "",
+            ], "Input values should be preserved after second refresh"
+            assert select_values == [
+                "text", "pdf", "text",
+            ], "Select values should be preserved after second refresh"
 
 
 # ============================================================================
