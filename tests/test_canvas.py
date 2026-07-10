@@ -19,7 +19,7 @@ import pytest
 
 
 class _FakeStorage:
-    """In-memory dict that mimics ``nicegui.app.storage.user``."""
+    """In-memory dict that mimics ``canvas.app.storage.user``."""
 
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
@@ -40,12 +40,6 @@ class _FakeStorage:
         self._data.clear()
 
 
-# Patch canvas module's app.storage.user before importing
-import nicegui  # noqa: E402
-
-_fake_nicegui_app = type("App", (), {"storage": type("Storage", (), {"user": _FakeStorage()})()})()
-nicegui.app = _fake_nicegui_app  # type: ignore[assignment]
-
 # Make 'models' importable even in isolation
 import sys  # noqa: E402
 
@@ -55,6 +49,25 @@ if _proj_root not in sys.path:
 
 import canvas  # noqa: E402
 import models  # noqa: E402
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Fixtures  — patch canvas.app so unit tests don't need a NiceGUI server.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture(autouse=True)
+def _patch_canvas_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch ``canvas.app`` with a fake app to isolate from real NiceGUI.
+
+    This runs before every test and restores the real ``canvas.app``
+    afterwards, preventing test_canvas.py from leaking the mock into
+    other test modules (e.g. test_app.py).
+    """
+    fake_app = type(
+        "App", (), {"storage": type("Storage", (), {"user": _FakeStorage()})()}
+    )()
+    monkeypatch.setattr(canvas, "app", fake_app)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -72,6 +85,8 @@ def _fresh_state() -> dict[str, Any]:
         "connecting_from": None,
         "undo_stack": [],
         "redo_stack": [],
+        "node_counter": 0,
+        "edge_counter": 0,
     }
 
 
@@ -662,7 +677,7 @@ class TestSync:
 
     def setup_method(self):
         """Reset storage before each test."""
-        nicegui.app.storage.user.clear()  # type: ignore[attr-defined]
+        canvas.app.storage.user.clear()  # type: ignore[attr-defined]
 
     def test_sync_from_crew_model_empty(self):
         s = _fresh_state()
@@ -696,7 +711,7 @@ class TestSync:
                 ),
             ],
         )
-        nicegui.app.storage.user["crew_model"] = crew.model_dump()  # type: ignore[attr-defined]
+        canvas.app.storage.user["crew_model"] = crew.model_dump()  # type: ignore[attr-defined]
         canvas.sync_from_crew_model(s)
 
         assert len(s["nodes"]) == 4  # 2 agents + 2 tasks
@@ -720,14 +735,14 @@ class TestSync:
                 name="Dummy", description="x", expected_output="y",
             )],
         )
-        nicegui.app.storage.user["crew_model"] = crew.model_dump()  # type: ignore[attr-defined]
+        canvas.app.storage.user["crew_model"] = crew.model_dump()  # type: ignore[attr-defined]
 
         # Create an edge
         canvas.create_edge(s, "task_0", "task_1")
         canvas.sync_to_crew_model(s)
 
         # Read back
-        stored = nicegui.app.storage.user["crew_model"]  # type: ignore[attr-defined]
+        stored = canvas.app.storage.user["crew_model"]  # type: ignore[attr-defined]
         assert isinstance(stored, dict)
         updated = models.CrewModel(**stored)
         assert len(updated.agents) == 1
@@ -750,7 +765,7 @@ class TestSync:
             agents=[models.AgentModel(role="Only", goal="Be useful")],
             tasks=[],
         )
-        nicegui.app.storage.user["crew_model"] = crew.model_dump()  # type: ignore[attr-defined]
+        canvas.app.storage.user["crew_model"] = crew.model_dump()  # type: ignore[attr-defined]
         canvas.sync_from_crew_model(s)
         assert len(s["nodes"]) == 1  # only the agent
         assert s["edges"] == []
@@ -764,10 +779,10 @@ class TestSync:
             agents=[models.AgentModel(role="Old", goal="Work")],
             tasks=[],
         )
-        nicegui.app.storage.user["crew_model"] = crew.model_dump()  # type: ignore[attr-defined]
+        canvas.app.storage.user["crew_model"] = crew.model_dump()  # type: ignore[attr-defined]
         s = _state_with_nodes(task_count=1, agent_count=1)
         canvas.sync_to_crew_model(s)
-        stored = nicegui.app.storage.user["crew_model"]  # type: ignore[attr-defined]
+        stored = canvas.app.storage.user["crew_model"]  # type: ignore[attr-defined]
         updated = models.CrewModel(**stored)
         assert updated.name == "Preserved Name"
         assert updated.description == "Keep me"
@@ -877,3 +892,191 @@ class TestIntegration:
         s["zoom"] = 0.5
         # Zoom only affects rendering, not node positions
         assert s["nodes"] == nodes_before
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Fix-verification tests — guard against XSS, ID collision, and
+#  sync data-loss regressions (PR #9 adversarial review items).
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestXSSEscaping:
+    """``_build_canvas_html`` must escape all user-controlled strings."""
+
+    HTML_ENTITIES = "<script>alert('xss')</script>"
+
+    def test_escapes_label(self):
+        s = _fresh_state()
+        s["nodes"].append({
+            "id": "task_0", "type": "task", "x": 0, "y": 0,
+            "w": 100, "h": 50, "label": self.HTML_ENTITIES,
+            "subtitle": "safe",
+        })
+        html_out = canvas._build_canvas_html(s)
+        assert self.HTML_ENTITIES not in html_out, (
+            "Raw HTML in label must be escaped"
+        )
+        assert "&lt;script&gt;" in html_out
+
+    def test_escapes_subtitle(self):
+        s = _fresh_state()
+        s["nodes"].append({
+            "id": "task_0", "type": "task", "x": 0, "y": 0,
+            "w": 100, "h": 50, "label": "safe",
+            "subtitle": self.HTML_ENTITIES,
+        })
+        html_out = canvas._build_canvas_html(s)
+        assert self.HTML_ENTITIES not in html_out
+        assert "&lt;script&gt;" in html_out
+
+    def test_escapes_data_id(self):
+        """``data-id`` attribute must be HTML-escaped to prevent attr injection."""
+        s = _fresh_state()
+        malicious_id = '"><script>evil()</script>'
+        s["nodes"].append({
+            "id": malicious_id, "type": "task", "x": 0, "y": 0,
+            "w": 100, "h": 50, "label": "safe", "subtitle": "safe",
+        })
+        html_out = canvas._build_canvas_html(s)
+        assert 'script>evil()<' not in html_out
+        assert "&gt;" in html_out
+
+
+class TestNodeIDCollision:
+    """Node and edge IDs must remain unique after deletions (monotonic counter)."""
+
+    def test_add_after_delete_does_not_reuse_id(self):
+        s = _fresh_state()
+        canvas.add_node(s, "task")   # task_0
+        canvas.add_node(s, "task")   # task_1
+        canvas.add_node(s, "task")   # task_2
+        assert {n["id"] for n in s["nodes"]} == {"task_0", "task_1", "task_2"}
+
+        canvas.delete_node(s, "task_0")
+        assert canvas._find_node(s, "task_0") is None
+        assert len(s["nodes"]) == 2
+
+        canvas.add_node(s, "task")   # must NOT be task_0 (collision)
+        ids = {n["id"] for n in s["nodes"]}
+        assert len(ids) == 3, f"Duplicate ID detected: {ids}"
+        assert "task_0" not in ids, "Deleted ID was reused"
+        assert "task_3" in ids, (
+            f"Expected task_3 (monotonic counter), got {ids}"
+        )
+
+    def test_edge_id_after_delete(self):
+        s = _state_with_nodes(task_count=3, agent_count=0)
+        canvas.create_edge(s, "task_0", "task_1")  # edge_0
+        canvas.create_edge(s, "task_1", "task_2")  # edge_1
+        assert {e["id"] for e in s["edges"]} == {"edge_0", "edge_1"}
+
+        canvas.delete_edge(s, "edge_0")
+        canvas.create_edge(s, "task_2", "task_0")  # must NOT be edge_0
+        edge_ids = {e["id"] for e in s["edges"]}
+        assert "edge_0" not in edge_ids, "Deleted edge ID was reused"
+        assert "edge_2" in edge_ids
+
+
+class TestSyncPreservesFields(TestSync):
+    """``sync_to_crew_model`` must merge, not rebuild — preserving all fields."""
+
+    def test_sync_preserves_agent_backstory(self):
+        s = _state_with_nodes(task_count=0, agent_count=1)
+        s["nodes"][0]["label"] = "Researcher"
+        crew = models.CrewModel(
+            name="Test",
+            agents=[models.AgentModel(
+                role="Researcher", goal="Research",
+                backstory="Original backstory",
+                allow_delegation=True,
+                max_iter=15,
+            )],
+            tasks=[],
+        )
+        canvas.app.storage.user["crew_model"] = crew.model_dump()  # type: ignore[attr-defined]
+        canvas.sync_to_crew_model(s)
+        stored = canvas.app.storage.user["crew_model"]  # type: ignore[attr-defined]
+        updated = models.CrewModel(**stored)
+        assert updated.agents[0].role == "Researcher"
+        assert updated.agents[0].backstory == "Original backstory"
+        assert updated.agents[0].allow_delegation is True
+        assert updated.agents[0].max_iter == 15
+
+    def test_sync_preserves_task_output_file_and_guardrails(self):
+        s = _state_with_nodes(task_count=0, agent_count=0)
+        canvas.add_node(s, "task", label="Research")
+        crew = models.CrewModel(
+            name="Test",
+            agents=[],
+            tasks=[models.TaskModel(
+                name="Research",
+                description="Do research",
+                expected_output="Report",
+                output_file="research.md",
+                human_input=True,
+                async_execution=False,
+                guardrails=["Check citations"],
+                markdown=True,
+            )],
+        )
+        canvas.app.storage.user["crew_model"] = crew.model_dump()  # type: ignore[attr-defined]
+        canvas.sync_to_crew_model(s)
+        stored = canvas.app.storage.user["crew_model"]  # type: ignore[attr-defined]
+        updated = models.CrewModel(**stored)
+        assert updated.tasks[0].output_file == "research.md"
+        assert updated.tasks[0].human_input is True
+        assert updated.tasks[0].guardrails == ["Check citations"]
+        assert updated.tasks[0].markdown is True
+
+    def test_sync_preserves_new_task_context_from_edges(self):
+        """New tasks created on canvas with edges should have correct context."""
+        s = _fresh_state()
+        canvas.add_node(s, "task", label="Research")   # task_0
+        canvas.add_node(s, "task", label="Write")      # task_1
+        canvas.create_edge(s, "task_0", "task_1")
+        crew = models.CrewModel(name="Test", agents=[], tasks=[])
+        canvas.app.storage.user["crew_model"] = crew.model_dump()  # type: ignore[attr-defined]
+        canvas.sync_to_crew_model(s)
+        stored = canvas.app.storage.user["crew_model"]  # type: ignore[attr-defined]
+        updated = models.CrewModel(**stored)
+        assert len(updated.tasks) == 2
+        write_task = [t for t in updated.tasks if t.name == "Write"][0]
+        assert "Research" in write_task.context
+
+    def test_sync_removes_deleted_agents(self):
+        """Agents removed from canvas must be removed from crew model."""
+        s = _fresh_state()
+        canvas.add_node(s, "agent", label="Researcher")
+        canvas.add_node(s, "agent", label="Writer")
+        canvas.add_node(s, "agent", label="Reviewer")
+        crew = models.CrewModel(
+            name="Test",
+            agents=[
+                models.AgentModel(role="Researcher", goal="Research"),
+                models.AgentModel(role="Writer", goal="Write"),
+                models.AgentModel(role="Reviewer", goal="Review"),
+            ],
+            tasks=[],
+        )
+        canvas.app.storage.user["crew_model"] = crew.model_dump()  # type: ignore[attr-defined]
+        # Delete Writer from canvas
+        canvas.delete_node(s, "agent_1")
+        canvas.sync_to_crew_model(s)
+        stored = canvas.app.storage.user["crew_model"]  # type: ignore[attr-defined]
+        updated = models.CrewModel(**stored)
+        assert len(updated.agents) == 2
+        assert {a.role for a in updated.agents} == {"Researcher", "Reviewer"}
+
+
+class TestToolbarRefreshable:
+    """``_render_toolbar`` must be decorated with ``@ui.refreshable``."""
+
+    def test_has_refresh_method(self):
+        assert hasattr(canvas._render_toolbar, "refresh"), (
+            "_render_toolbar must be decorated with @ui.refreshable"
+        )
+
+    def test_has_refreshable_attribute(self):
+        assert callable(canvas._render_toolbar.refresh), (
+            "_render_toolbar.refresh must be callable"
+        )

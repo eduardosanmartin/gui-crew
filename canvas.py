@@ -22,6 +22,7 @@ Architecture
 
 from __future__ import annotations
 
+import html
 from collections import deque
 from typing import Any
 
@@ -69,6 +70,8 @@ def _get_state() -> dict[str, Any]:
             "connecting_from": None,
             "undo_stack": [],
             "redo_stack": [],
+            "node_counter": 0,
+            "edge_counter": 0,
         }
     return app.storage.user["canvas_state"]  # type: ignore[no-any-return]
 
@@ -331,10 +334,12 @@ def add_node(
 ) -> str:
     """Add a new node to the canvas.  Returns the new node id."""
     _push_undo(state)
+    counter = state.get("node_counter", len(state["nodes"]))
+    node_id = f"{node_type}_{counter}"
+    state["node_counter"] = counter + 1
     type_count = len(
         [n for n in state["nodes"] if n["type"] == node_type]
     )
-    node_id = f"{node_type}_{len(state['nodes'])}"
     default_label = (
         f"New Agent {type_count + 1}"
         if node_type == "agent"
@@ -403,7 +408,9 @@ def create_edge(
 
     _push_undo(state)
 
-    edge_id = f"edge_{len(state['edges'])}"
+    edge_counter = state.get("edge_counter", len(state["edges"]))
+    edge_id = f"edge_{edge_counter}"
+    state["edge_counter"] = edge_counter + 1
     temp_edge: dict[str, Any] = {
         "id": edge_id, "from": from_id, "to": to_id, "cycle": False,
     }
@@ -517,7 +524,13 @@ def sync_from_crew_model(state: dict[str, Any]) -> None:
 
 
 def sync_to_crew_model(state: dict[str, Any]) -> None:
-    """Apply canvas mutations back to the shared ``crew_model``."""
+    """Apply canvas mutations back to the shared ``crew_model``.
+
+    Merges changes into existing agents/tasks instead of rebuilding
+    from scratch, preserving fields that are not editable on the canvas
+    (e.g. backstory, LLM, tools, memory, delegation, output_file,
+    guardrails, async, human_input, markdown, extra fields).
+    """
     import models as _m
 
     raw = app.storage.user.get("crew_model")
@@ -534,38 +547,78 @@ def sync_to_crew_model(state: dict[str, Any]) -> None:
     else:
         return
 
-    new_agents: list[dict[str, Any]] = []
-    new_tasks: list[dict[str, Any]] = []
+    # Build lookup maps from existing crew
+    existing_agents: dict[str, _m.AgentModel] = {
+        a.role: a for a in crew.agents
+    }
+    existing_tasks: dict[str, _m.TaskModel] = {
+        t.name: t for t in crew.tasks
+    }
+
+    # Collect canvas node data
     node_id_to_task_name: dict[str, str] = {}
+    # Build context from edges: {task_name: set(context_names)}
+    edge_context: dict[str, set[str]] = {}
 
     for node in state["nodes"]:
-        if node["type"] == "agent":
-            new_agents.append({
-                "role": node["label"],
-                "goal": node.get("subtitle", ""),
-            })
-        elif node["type"] == "task":
-            task_name = node["label"]
-            node_id_to_task_name[node["id"]] = task_name
-            new_tasks.append({
-                "name": task_name,
-                "description": node.get("subtitle", ""),
-                "expected_output": node.get("expected_output", "Output from " + task_name),
-                "agent_role": None,
-                "context": [],
-            })
+        if node["type"] == "task":
+            task_label = node["label"]
+            node_id_to_task_name[node["id"]] = task_label
+            if task_label not in edge_context:
+                edge_context[task_label] = set()
 
     for edge in state["edges"]:
         from_name = node_id_to_task_name.get(edge["from"])
         to_name = node_id_to_task_name.get(edge["to"])
-        if from_name and to_name:
-            for t in new_tasks:
-                if t["name"] == to_name:
-                    if from_name not in t["context"]:
-                        t["context"].append(from_name)
+        if from_name and to_name and to_name in edge_context:
+            edge_context[to_name].add(from_name)
 
-    crew.agents = [_m.AgentModel(**a) for a in new_agents]
-    crew.tasks = [_m.TaskModel(**t) for t in new_tasks]
+    # Merge agents — preserve existing fields, update role/goal
+    merged_agents: list[_m.AgentModel] = []
+    for node in state["nodes"]:
+        if node["type"] != "agent":
+            continue
+        role = node["label"]
+        goal = node.get("subtitle", "")
+        if role in existing_agents:
+            agent = existing_agents[role]
+            agent.role = role
+            agent.goal = goal
+        else:
+            agent = _m.AgentModel(role=role, goal=goal)
+        merged_agents.append(agent)
+
+    # Merge tasks — preserve existing fields, update name/description/
+    # expected_output/context
+    merged_tasks: list[_m.TaskModel] = []
+    for node in state["nodes"]:
+        if node["type"] != "task":
+            continue
+        task_name = node["label"]
+        description = node.get("subtitle", "")
+        expected_output = node.get(
+            "expected_output", f"Output from {task_name}"
+        )
+        context = sorted(edge_context.get(task_name, []))
+
+        if task_name in existing_tasks:
+            task = existing_tasks[task_name]
+            task.name = task_name
+            task.description = description
+            task.expected_output = expected_output
+            task.context = context
+            # agent_role is not synced from canvas — preserve existing
+        else:
+            task = _m.TaskModel(
+                name=task_name,
+                description=description,
+                expected_output=expected_output,
+                context=context,
+            )
+        merged_tasks.append(task)
+
+    crew.agents = merged_agents
+    crew.tasks = merged_tasks
     app.storage.user["crew_model"] = crew.model_dump()
 
 
@@ -597,8 +650,13 @@ def _build_canvas_html(state: dict[str, Any]) -> str:
 
         w = _node_w(state, node)
         h = _node_h(state, node)
+        node_id_escaped = html.escape(str(node["id"]), quote=True)
+        node_label_escaped = html.escape(str(node.get("label", "")), quote=True)
+        node_subtitle_escaped = html.escape(
+            str(node.get("subtitle", "")), quote=True
+        )
         nodes_html_parts.append(
-            f'<div class="cn-node" data-id="{node["id"]}" '
+            f'<div class="cn-node" data-id="{node_id_escaped}" '
             f'style="position:absolute;left:{node["x"]}px;top:{node["y"]}px;'
             f'width:{w}px;height:{h}px;background:{color}18;'
             f'border:2px solid {color};{shape}{selected_border}{connecting_border}'
@@ -607,11 +665,11 @@ def _build_canvas_html(state: dict[str, Any]) -> str:
             f'transition:box-shadow 0.15s;" '
             f'onclick="window._gcClick=this.dataset.id">'
             f'<div style="font-weight:700;font-size:12px;text-align:center;'
-            f'padding:4px 8px;color:{color}">{node["label"]}</div>'
+            f'padding:4px 8px;color:{color}">{node_label_escaped}</div>'
             f'<div style="font-size:10px;color:#666;text-align:center;'
             f'padding:0 8px 4px;overflow:hidden;text-overflow:ellipsis;'
             f'white-space:nowrap;max-width:{w - 16}px">'
-            f'{node.get("subtitle", "")}</div>'
+            f'{node_subtitle_escaped}</div>'
             f"</div>"
         )
 
@@ -708,6 +766,7 @@ def _on_add_node(state: dict[str, Any], node_type: str) -> None:
     add_node(state, node_type)
     sync_to_crew_model(state)
     _render_canvas_area.refresh()  # type: ignore[attr-defined]
+    _render_toolbar.refresh()  # type: ignore[attr-defined]
 
 
 def _cancel_connect(state: dict[str, Any]) -> None:
@@ -715,10 +774,13 @@ def _cancel_connect(state: dict[str, Any]) -> None:
     state["connecting_from"] = None
     _save_state(state)
     _render_canvas_area.refresh()  # type: ignore[attr-defined]
+    _render_toolbar.refresh()  # type: ignore[attr-defined]
 
 
-def _render_toolbar(state: dict[str, Any]) -> None:
+@ui.refreshable
+def _render_toolbar() -> None:
     """Toolbar with auto-layout, zoom, undo/redo, DAG validate."""
+    state = _get_state()
     with ui.row().classes("items-center gap-2 q-mb-sm"):
         ui.button(
             "Auto Layout",
@@ -794,6 +856,7 @@ def _do_auto_layout(state: dict[str, Any]) -> None:
     auto_layout(state)
     sync_to_crew_model(state)
     _render_canvas_area.refresh()  # type: ignore[attr-defined]
+    _render_toolbar.refresh()  # type: ignore[attr-defined]
 
 
 def _zoom(state: dict[str, Any], delta: float) -> None:
@@ -801,6 +864,7 @@ def _zoom(state: dict[str, Any], delta: float) -> None:
     state["zoom"] = max(0.25, min(2.0, state.get("zoom", 1.0) + delta))
     _save_state(state)
     _render_canvas_area.refresh()  # type: ignore[attr-defined]
+    _render_toolbar.refresh()  # type: ignore[attr-defined]
 
 
 def _fit_screen(state: dict[str, Any]) -> None:
@@ -808,6 +872,7 @@ def _fit_screen(state: dict[str, Any]) -> None:
     state["zoom"] = 1.0
     _save_state(state)
     _render_canvas_area.refresh()  # type: ignore[attr-defined]
+    _render_toolbar.refresh()  # type: ignore[attr-defined]
 
 
 def _do_undo(state: dict[str, Any]) -> None:
@@ -815,6 +880,7 @@ def _do_undo(state: dict[str, Any]) -> None:
     if undo(state):
         sync_to_crew_model(state)
         _render_canvas_area.refresh()  # type: ignore[attr-defined]
+        _render_toolbar.refresh()  # type: ignore[attr-defined]
 
 
 def _do_redo(state: dict[str, Any]) -> None:
@@ -822,6 +888,7 @@ def _do_redo(state: dict[str, Any]) -> None:
     if redo(state):
         sync_to_crew_model(state)
         _render_canvas_area.refresh()  # type: ignore[attr-defined]
+        _render_toolbar.refresh()  # type: ignore[attr-defined]
 
 
 def _validate_and_show(state: dict[str, Any]) -> None:
@@ -844,6 +911,7 @@ def _validate_and_show(state: dict[str, Any]) -> None:
             timeout=3000,
         )
     _render_canvas_area.refresh()  # type: ignore[attr-defined]
+    _render_toolbar.refresh()  # type: ignore[attr-defined]
 
 
 def _delete_selected(state: dict[str, Any]) -> None:
@@ -856,6 +924,7 @@ def _delete_selected(state: dict[str, Any]) -> None:
         delete_node(state, sel)
         sync_to_crew_model(state)
         _render_canvas_area.refresh()  # type: ignore[attr-defined]
+        _render_toolbar.refresh()  # type: ignore[attr-defined]
         dialog.close()
 
     with ui.dialog() as dialog, ui.card():
@@ -873,6 +942,7 @@ def _sync_and_refresh(state: dict[str, Any]) -> None:
     """Sync nodes/edges from the crew_model and re-render."""
     sync_from_crew_model(state)
     _render_canvas_area.refresh()  # type: ignore[attr-defined]
+    _render_toolbar.refresh()  # type: ignore[attr-defined]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -998,11 +1068,12 @@ def render_canvas() -> None:
         if result and isinstance(result, str) and result.strip():
             _handle_node_click(state, result)
             _render_canvas_area.refresh()  # type: ignore[attr-defined]
+            _render_toolbar.refresh()  # type: ignore[attr-defined]
 
     ui.timer(0.3, _poll_click)
 
     with ui.row().classes("w-full items-start gap-0"):
         _render_palette(state)
         with ui.column().classes("flex-1 q-pl-md"):
-            _render_toolbar(state)
+            _render_toolbar()
             _render_canvas_area()
