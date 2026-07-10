@@ -167,27 +167,27 @@ Chain strategy: **feature-branch-chain**
   - **AC**: GIVEN tasks "Research" and "Write Report", WHEN editing "Write Report" and adding "Research" to context, THEN task model updates and DAG edge is implied.
   - **Deps**: 1.22
 
-- [ ] 1.24 Implement LLM / memory / knowledge sub-forms (~80 LOC, Risk: Low)
+- [x] 1.24 Implement LLM / memory / knowledge sub-forms (~80 LOC, Risk: Low)
   - **Description**: Reusable form components for LLM config, memory settings, knowledge sources.
   - **AC**: GIVEN an agent form, WHEN opening the LLM sub-form and setting model="claude-3-5-sonnet", THEN the LLM config saves to the agent model.
   - **Deps**: 1.21
 
-- [ ] 1.25 Implement guided wizard mode (5 steps) (~120 LOC, Risk: Med)
+- [x] 1.25 Implement guided wizard mode (5 steps) (~120 LOC, Risk: Med)
   - **Description**: Step-by-step: (1) template or blank, (2) goal, (3) add agents, (4) define tasks, (5) review & save. Progress indicator. Sensible defaults. Advanced params hidden.
   - **AC**: GIVEN a first-time user, WHEN selecting "Guided Wizard", THEN 5-step flow appears with progress bar, and advanced fields are hidden.
   - **Deps**: 1.24
 
-- [ ] 1.26 Implement tool catalog display and custom tool form (~80 LOC, Risk: Med)
+- [x] 1.26 Implement tool catalog display and custom tool form (~80 LOC, Risk: Med)
   - **Description**: Built-in crewai-tools catalog with search/filter. Custom tool form: name, description, Pydantic args_schema editor.
   - **AC**: GIVEN the tool catalog is open, WHEN searching "serper", THEN `SerperDevTool` appears. WHEN adding a custom tool with args_schema, THEN it serializes correctly.
   - **Deps**: 1.22
 
-- [ ] 1.27 Implement variable interpolation preview (~40 LOC, Risk: Low)
+- [x] 1.27 Implement variable interpolation preview (~40 LOC, Risk: Low)
   - **Description**: Live preview of `{variable}` interpolation in goal/backstory fields using default values from `crew.inputs`.
   - **AC**: GIVEN crew has input `{topic}="AI"`, WHEN typing goal="Research {topic}", THEN a live preview shows "Research AI".
   - **Deps**: 1.23
 
-- [ ] 1.28 Implement save/load crew to/from `app.storage.user` (~40 LOC, Risk: Low)
+- [x] 1.28 Implement save/load crew to/from `app.storage.user` (~40 LOC, Risk: Low)
   - **Description**: Explicit Save button writes `CrewModel` to `app.storage.user["crew_model"]`. Load on page init.
   - **AC**: GIVEN a configured crew, WHEN clicking "Save", THEN `app.storage.user["crew_model"]` contains the full crew dump. WHEN reloading the page, THEN form populates from storage.
   - **Deps**: 1.21–1.27

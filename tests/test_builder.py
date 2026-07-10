@@ -16,6 +16,7 @@ a full NiceGUI server context.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock, PropertyMock, patch
 
@@ -599,3 +600,814 @@ class TestVariableReferences:
             w for w in record if issubclass(w.category, RuntimeWarning)
         ]
         assert len(runtime_warnings) == 0
+
+
+# ============================================================================
+#  Task 1.24 - LLM / Memory / Knowledge Sub-forms
+# ============================================================================
+
+class TestLLMSubForm:
+    """LLM sub-form model creation and validation."""
+
+    def test_create_llm_model(self) -> None:
+        """LLMModel can be created with all fields."""
+        llm = m.LLMModel(
+            model="claude-3-5-sonnet",
+            temperature=0.3,
+            base_url="https://api.anthropic.com",
+            api_key_env="ANTHROPIC_API_KEY",
+        )
+        assert llm.model == "claude-3-5-sonnet"
+        assert llm.temperature == 0.3
+        assert llm.base_url == "https://api.anthropic.com"
+        assert llm.api_key_env == "ANTHROPIC_API_KEY"
+
+    def test_llm_model_defaults(self) -> None:
+        """LLMModel defaults to gpt-4o."""
+        llm = m.LLMModel()
+        assert llm.model == "openai/gpt-4o"
+        assert llm.temperature is None
+
+    def test_llm_model_can_be_none_on_agent(self) -> None:
+        """Agent can have no LLM (uses crew default)."""
+        agent = m.AgentModel(role="R", goal="G")
+        assert agent.llm is None
+
+    def test_llm_saves_to_agent_model(self) -> None:
+        """LLM config can be set on an agent."""
+        agent = m.AgentModel(
+            role="Researcher",
+            goal="Research",
+            llm=m.LLMModel(model="claude-3-5-sonnet", temperature=0.5),
+        )
+        assert agent.llm is not None
+        assert agent.llm.model == "claude-3-5-sonnet"
+        assert agent.llm.temperature == 0.5
+
+    def test_llm_model_roundtrip_through_dict(self) -> None:
+        """LLMModel serializes and deserializes correctly."""
+        llm = m.LLMModel(
+            model="gpt-4o",
+            temperature=0.7,
+            base_url="http://localhost:11434/v1",
+        )
+        d = llm.model_dump()
+        reloaded = m.LLMModel(**d)
+        assert reloaded.model == llm.model
+        assert reloaded.temperature == llm.temperature
+        assert reloaded.base_url == llm.base_url
+
+    def test_llm_model_extra_fields_forward_compat(self) -> None:
+        """LLMModel extra fields pass through (forward compat)."""
+        llm = m.LLMModel(model="gpt-5", max_tokens=4096)
+        assert llm.model_extra is not None
+        assert llm.model_extra.get("max_tokens") == 4096
+
+
+class TestMemorySubForm:
+    """Memory sub-form model creation and validation."""
+
+    def test_memory_config_defaults(self) -> None:
+        """MemoryConfig has sensible defaults."""
+        mem = m.MemoryConfig()
+        assert mem.enabled is False
+        assert mem.recency_weight is None
+
+    def test_memory_config_enabled(self) -> None:
+        """MemoryConfig with enabled=True."""
+        mem = m.MemoryConfig(enabled=True, recency_weight=0.3)
+        assert mem.enabled is True
+        assert mem.recency_weight == 0.3
+
+    def test_memory_config_all_fields(self) -> None:
+        """MemoryConfig with all fields set."""
+        mem = m.MemoryConfig(
+            enabled=True,
+            recency_weight=0.3,
+            semantic_weight=0.5,
+            importance_weight=0.2,
+            recency_half_life_days=7,
+            embedder={"provider": "openai", "model": "text-embedding-3-small"},
+        )
+        assert mem.recency_half_life_days == 7
+        assert mem.embedder is not None
+        assert mem.embedder["provider"] == "openai"
+
+    def test_agent_memory_bool(self) -> None:
+        """Agent memory can be a simple bool."""
+        agent = m.AgentModel(role="R", goal="G", memory=True)
+        assert agent.memory is True
+
+    def test_agent_memory_config(self) -> None:
+        """Agent memory can be a full MemoryConfig."""
+        agent = m.AgentModel(
+            role="R",
+            goal="G",
+            memory=m.MemoryConfig(enabled=True, recency_weight=0.5),
+        )
+        assert isinstance(agent.memory, m.MemoryConfig)
+        assert agent.memory.recency_weight == 0.5
+
+    def test_crew_memory_config(self) -> None:
+        """Crew-level memory can be MemoryConfig."""
+        cm = m.CrewModel(
+            name="Mem Crew",
+            memory=m.MemoryConfig(enabled=True, recency_half_life_days=14),
+        )
+        assert isinstance(cm.memory, m.MemoryConfig)
+        assert cm.memory.recency_half_life_days == 14
+
+
+class TestKnowledgeSubForm:
+    """Knowledge sources data management."""
+
+    def test_knowledge_sources_list(self) -> None:
+        """Knowledge sources can be stored as a list of dicts."""
+        sources: list[dict[str, Any]] = [
+            {"name": "Company Wiki", "kind": "text"},
+            {"name": "API Docs", "kind": "pdf"},
+        ]
+        cm = m.CrewModel(name="KS Crew", knowledge_sources=sources)
+        assert len(cm.knowledge_sources) == 2
+        assert cm.knowledge_sources[0]["name"] == "Company Wiki"
+
+    def test_knowledge_sources_empty_default(self) -> None:
+        """Knowledge sources default to empty list."""
+        cm = m.CrewModel(name="No KS")
+        assert cm.knowledge_sources == []
+
+    def test_knowledge_sources_multiple_refresh(self) -> None:
+        """Multiple _refresh_sources calls preserve field values (regression)."""
+        existing: list[dict[str, Any]] = [
+            {"name": "Source A", "kind": "text"},
+            {"name": "Source B", "kind": "pdf"},
+        ]
+
+        # Track values passed to _full_input / _full_select on each refresh
+        input_values: list[Any] = []
+        select_values: list[Any] = []
+        button_callbacks: dict[str, Callable[[], None]] = {}
+
+        def _tracking_input(**kw: Any) -> MagicMock:
+            if "value" in kw:
+                input_values.append(kw["value"])
+            mock = MagicMock()
+            mock.value = kw.get("value", "")
+            return mock
+
+        def _tracking_select(**kw: Any) -> MagicMock:
+            if "value" in kw:
+                select_values.append(kw["value"])
+            mock = MagicMock()
+            mock.value = kw.get("value", "text")
+            return mock
+
+        def _tracking_button(text: str = "", **kw: Any) -> MagicMock:
+            if text and "on_click" in kw:
+                button_callbacks[text] = kw["on_click"]
+            return MagicMock()
+
+        with (
+            patch("builder.ui.dialog") as mock_dialog,
+            patch("builder.ui.card"),
+            patch("builder.ui.label"),
+            patch("builder.ui.row"),
+            patch("builder.ui.column"),
+            patch("builder.ui.button", side_effect=_tracking_button),
+            patch("builder._full_input", side_effect=_tracking_input),
+            patch("builder._full_select", side_effect=_tracking_select),
+        ):
+            mock_dialog.return_value.__enter__.return_value = MagicMock()
+            mock_dialog.return_value.__exit__.return_value = None
+
+            on_save = MagicMock()
+            builder._render_knowledge_sub_form(existing, on_save)
+
+            # First refresh: 2 sources → 2 input + 2 select calls
+            assert input_values == ["Source A", "Source B"]
+            assert select_values == ["text", "pdf"]
+
+            # Simulate adding a source — triggers second _refresh_sources
+            add_callback = button_callbacks.get("+ Add Source")
+            assert add_callback is not None, "Add Source button callback not captured"
+
+            input_values.clear()
+            select_values.clear()
+            add_callback()
+
+            # Second refresh: 3 sources with preserved values
+            assert input_values == [
+                "Source A", "Source B", "",
+            ], "Input values should be preserved after second refresh"
+            assert select_values == [
+                "text", "pdf", "text",
+            ], "Select values should be preserved after second refresh"
+
+
+# ============================================================================
+#  Task 1.25 - Guided Wizard Mode
+# ============================================================================
+
+class TestWizardMode:
+    """Wizard mode logic — template application and data conversion."""
+
+    def test_wizard_templates_exist(self) -> None:
+        """Wizard templates are defined and have required keys."""
+        from builder import _WIZARD_TEMPLATES
+        assert "blank" in _WIZARD_TEMPLATES
+        assert "research" in _WIZARD_TEMPLATES
+        assert "code_review" in _WIZARD_TEMPLATES
+        for key, tmpl in _WIZARD_TEMPLATES.items():
+            assert "name" in tmpl
+            assert "process" in tmpl
+
+    def test_research_template_has_agents_and_tasks(self) -> None:
+        """Research template has predefined agents and tasks."""
+        from builder import _WIZARD_TEMPLATES
+        tmpl = _WIZARD_TEMPLATES["research"]
+        assert len(tmpl["agents"]) >= 2
+        assert len(tmpl["tasks"]) >= 2
+
+    def test_blank_template_is_minimal(self) -> None:
+        """Blank template has no agents or tasks."""
+        from builder import _WIZARD_TEMPLATES
+        tmpl = _WIZARD_TEMPLATES["blank"]
+        assert "agents" not in tmpl or len(tmpl.get("agents", [])) == 0
+
+    def test_wizard_data_to_crew(self) -> None:
+        """Wizard data can be converted to a valid CrewModel."""
+        wizard_data = {
+            "name": "Test Wizard Crew",
+            "description": "Wizard test",
+            "process": "sequential",
+            "agents": [
+                {"role": "R", "goal": "Research", "backstory": "Experienced", "tools": []},
+            ],
+            "tasks": [
+                {
+                    "name": "T1",
+                    "description": "Do something",
+                    "expected_output": "Result",
+                    "agent_role": "R",
+                },
+            ],
+        }
+        agents = [
+            m.AgentModel(
+                role=a["role"],
+                goal=a["goal"],
+                backstory=a.get("backstory", ""),
+            )
+            for a in wizard_data["agents"]
+        ]
+        tasks = [
+            m.TaskModel(
+                name=t["name"],
+                description=t["description"],
+                expected_output=t["expected_output"],
+                agent_role=t.get("agent_role"),
+            )
+            for t in wizard_data["tasks"]
+        ]
+        cm = m.CrewModel(
+            name=wizard_data["name"],
+            description=wizard_data["description"],
+            process=wizard_data["process"],  # type: ignore[arg-type]
+            agents=agents,
+            tasks=tasks,
+        )
+        assert cm.name == "Test Wizard Crew"
+        assert len(cm.agents) == 1
+        assert cm.agents[0].role == "R"
+        assert len(cm.tasks) == 1
+        assert cm.tasks[0].name == "T1"
+
+    def test_wizard_agent_with_tools(self) -> None:
+        """Wizard agents can include tool names."""
+        wizard_agent = {
+            "role": "Researcher",
+            "goal": "Find info",
+            "backstory": "",
+            "tools": ["SerperDevTool", "FileReadTool"],
+        }
+        tools = [m.ToolRef(kind="builtin", name=tn) for tn in wizard_agent["tools"]]
+        agent = m.AgentModel(
+            role=wizard_agent["role"],
+            goal=wizard_agent["goal"],
+            backstory=wizard_agent["backstory"],
+            tools=tools,
+        )
+        assert len(agent.tools) == 2
+        assert agent.tools[0].name == "SerperDevTool"
+
+    def test_wizard_task_unassigned_agent(self) -> None:
+        """Wizard tasks can have no assigned agent."""
+        task = m.TaskModel(
+            name="T",
+            description="D",
+            expected_output="E",
+            agent_role=None,
+        )
+        assert task.agent_role is None
+
+    # ------------------------------------------------------------------
+    #  Fix 2: Wizard template data is copyable into wizard_data
+    # ------------------------------------------------------------------
+
+    def test_wizard_template_populates_agents_and_tasks(self) -> None:
+        """Template data can be deep-copied into wizard_data agents/tasks."""
+        from builder import _WIZARD_TEMPLATES
+
+        # Research template has predefined agents and tasks
+        tmpl = _WIZARD_TEMPLATES["research"]
+        agents = [dict(ag) for ag in tmpl.get("agents", [])]
+        tasks = [dict(tk) for tk in tmpl.get("tasks", [])]
+
+        assert len(agents) == 2
+        assert agents[0]["role"] == "Researcher"
+        assert agents[1]["role"] == "Writer"
+        assert len(tasks) == 2
+        assert tasks[0]["name"] == "Research"
+        assert tasks[1]["name"] == "Write Report"
+
+        # Blank template has no agents or tasks
+        blank = _WIZARD_TEMPLATES["blank"]
+        assert len(blank.get("agents", [])) == 0
+        assert len(blank.get("tasks", [])) == 0
+
+        # Code review template has expected structure
+        cr = _WIZARD_TEMPLATES["code_review"]
+        assert len(cr.get("agents", [])) == 2
+        assert cr["agents"][0]["role"] == "Reviewer"
+        assert len(cr.get("tasks", [])) == 2
+        assert cr["tasks"][1]["name"] == "Document"
+
+    # ------------------------------------------------------------------
+    #  Fix 3: _apply_wizard_to_model does not corrupt live model
+    # ------------------------------------------------------------------
+
+    def test_wizard_apply_uses_new_model_does_not_corrupt_original(self) -> None:
+        """Building a CrewModel from wizard data does not mutate the original."""
+        original = m.CrewModel(
+            name="Original Crew",
+            description="Original description",
+            agents=[m.AgentModel(role="R", goal="Research")],
+            tasks=[m.TaskModel(name="T1", description="D", expected_output="E")],
+        )
+        original_copy = original.model_copy(deep=True)
+
+        # Build agents and tasks from wizard data (simulating _apply_wizard_to_model)
+        wizard_data = {
+            "name": "Wizard Crew",
+            "description": "Wizard description",
+            "process": "sequential",
+            "agents": [
+                {"role": "A1", "goal": "G1", "backstory": "", "tools": []},
+                {"role": "A2", "goal": "G2", "backstory": "", "tools": []},
+            ],
+            "tasks": [
+                {"name": "T1", "description": "D1", "expected_output": "E1", "agent_role": "A1"},
+            ],
+        }
+
+        # Construct new model from wizard data (without touching original)
+        new_agents = [
+            m.AgentModel(
+                role=ag["role"], goal=ag["goal"],
+                backstory=ag.get("backstory", ""),
+            )
+            for ag in wizard_data["agents"]
+        ]
+        new_tasks = [
+            m.TaskModel(
+                name=tk["name"], description=tk["description"],
+                expected_output=tk["expected_output"],
+                agent_role=tk.get("agent_role"),
+            )
+            for tk in wizard_data["tasks"]
+        ]
+        new_cm = m.CrewModel(
+            name=wizard_data["name"],
+            description=wizard_data["description"],
+            process=wizard_data["process"],  # type: ignore[arg-type]
+            agents=new_agents,
+            tasks=new_tasks,
+        )
+
+        # Original must be untouched
+        assert original.name == "Original Crew"
+        assert original.description == "Original description"
+        assert len(original.agents) == 1
+        assert original.agents[0].role == "R"
+        assert len(original.tasks) == 1
+        assert original.tasks[0].name == "T1"
+
+        # New model has wizard data
+        assert new_cm.name == "Wizard Crew"
+        assert len(new_cm.agents) == 2
+        assert len(new_cm.tasks) == 1
+
+    def test_wizard_apply_preserves_original_on_invalid_data(self) -> None:
+        """Constructing a CrewModel with invalid data fails without touching original."""
+        original = m.CrewModel(
+            name="Safe Crew",
+            agents=[m.AgentModel(role="R", goal="Research")],
+        )
+
+        # Invalid wizard data — missing task required fields
+        with pytest.raises(Exception):
+            m.CrewModel(
+                name="Bad Crew",
+                tasks=[m.TaskModel(name="", description="", expected_output="")],
+            )
+
+        # Original must still be intact
+        assert original.name == "Safe Crew"
+        assert len(original.agents) == 1
+        assert original.agents[0].role == "R"
+
+
+# ============================================================================
+#  Task 1.26 - Custom Tool Form
+# ============================================================================
+
+class TestCustomToolForm:
+    """Custom tool creation via ToolRef model."""
+
+    def test_custom_tool_with_args_schema(self) -> None:
+        """Custom ToolRef with Pydantic args_schema serializes correctly."""
+        tool = m.ToolRef(
+            kind="custom",
+            name="MyApiTool",
+            params={"description": "Calls my API"},
+            args_schema={
+                "endpoint": {"type": "string", "description": "API endpoint"},
+                "method": {"type": "string", "description": "HTTP method", "default": "GET"},
+            },
+        )
+        assert tool.kind == "custom"
+        assert tool.name == "MyApiTool"
+        assert tool.args_schema is not None
+        assert tool.args_schema["endpoint"]["type"] == "string"
+        assert tool.args_schema["method"]["default"] == "GET"
+
+    def test_custom_tool_serializes_to_dict(self) -> None:
+        """Custom ToolRef model_dump preserves args_schema."""
+        tool = m.ToolRef(
+            kind="custom",
+            name="CustomTool",
+            args_schema={"param": {"type": "int"}},
+        )
+        d = tool.model_dump()
+        assert d["kind"] == "custom"
+        assert d["name"] == "CustomTool"
+        assert d["args_schema"] == {"param": {"type": "int"}}
+
+    def test_custom_tool_roundtrip(self) -> None:
+        """Custom ToolRef survives model_dump → ToolRef reconstruction."""
+        original = m.ToolRef(
+            kind="custom",
+            name="RoundTripTool",
+            params={"key": "val"},
+            args_schema={"input": {"type": "string"}},
+        )
+        reloaded = m.ToolRef(**original.model_dump())
+        assert reloaded.kind == "custom"
+        assert reloaded.name == "RoundTripTool"
+        assert reloaded.args_schema == {"input": {"type": "string"}}
+
+    def test_custom_tool_name_validation(self) -> None:
+        """Custom tool name must not be empty."""
+        with pytest.raises(ValueError, match="Tool name must not be empty"):
+            m.ToolRef(kind="custom", name="", args_schema={})
+
+    def test_builtin_tool_has_no_args_schema(self) -> None:
+        """Built-in tools don't need args_schema."""
+        tool = m.ToolRef(kind="builtin", name="SerperDevTool")
+        assert tool.kind == "builtin"
+        assert tool.args_schema is None
+
+    def test_tool_catalog_search(self) -> None:
+        """Tool catalogue supports name-based search."""
+        from builder import BUILTIN_TOOLS
+        matches = [t for t in BUILTIN_TOOLS if "serper" in t["name"].lower()]
+        assert len(matches) == 1
+        assert matches[0]["name"] == "SerperDevTool"
+
+    def test_tool_catalog_search_description(self) -> None:
+        """Tool catalogue supports description-based search."""
+        from builder import BUILTIN_TOOLS
+        matches = [t for t in BUILTIN_TOOLS if "scrape" in t["description"].lower()]
+        assert len(matches) >= 1
+
+    # ------------------------------------------------------------------
+    #  Fix 5: Custom tools are persisted and retrievable
+    # ------------------------------------------------------------------
+
+    def test_custom_tool_stored_in_storage(self) -> None:
+        """Custom tool persisted to storage appears in _all_tool_options."""
+        from unittest.mock import PropertyMock, patch
+        from nicegui.storage import Storage
+        from builder import _all_tool_options
+
+        tool_dict = {
+            "kind": "custom",
+            "name": "MyApiTool",
+            "params": {"description": "Calls my API"},
+            "args_schema": {"endpoint": {"type": "string"}},
+        }
+        user: dict[str, Any] = {"custom_tools": [tool_dict]}
+        with patch.object(
+            Storage, "user", new_callable=PropertyMock, return_value=user
+        ):
+            options = _all_tool_options()
+
+        custom_names = [t["name"] for t in options if t.get("_custom")]
+        assert "MyApiTool" in custom_names
+        assert len(custom_names) == 1
+
+    def test_custom_tools_empty_by_default(self) -> None:
+        """When no custom tools exist, _all_tool_options returns only built-in tools."""
+        from unittest.mock import PropertyMock, patch
+        from nicegui.storage import Storage
+        from builder import _all_tool_options
+
+        user: dict[str, Any] = {}
+        with patch.object(
+            Storage, "user", new_callable=PropertyMock, return_value=user
+        ):
+            options = _all_tool_options()
+
+        custom_tools = [t for t in options if t.get("_custom")]
+        assert len(custom_tools) == 0
+        assert len(options) == len(BUILTIN_TOOLS)
+
+
+# ============================================================================
+#  Task 1.27 - Variable Interpolation Preview
+# ============================================================================
+
+class TestVariableInterpolationPreview:
+    """Variable interpolation preview logic."""
+
+    def test_interpolate_single_variable(self) -> None:
+        """A single {var} is replaced by its default value."""
+        inputs = [m.InputVar(name="topic", type="str", default="AI")]
+        result = builder._interpolate_preview("Research {topic}", inputs)
+        assert result == "Research AI"
+
+    def test_interpolate_multiple_variables(self) -> None:
+        """Multiple {var} placeholders are replaced."""
+        inputs = [
+            m.InputVar(name="topic", type="str", default="AI"),
+            m.InputVar(name="depth", type="str", default="comprehensive"),
+        ]
+        result = builder._interpolate_preview(
+            "Research {topic} with {depth} analysis", inputs,
+        )
+        assert result == "Research AI with comprehensive analysis"
+
+    def test_interpolate_unknown_variable_preserved(self) -> None:
+        """Unknown {var} is left as-is."""
+        inputs = [m.InputVar(name="topic", type="str", default="AI")]
+        result = builder._interpolate_preview("Research {topic} for {audience}", inputs)
+        assert result == "Research AI for {audience}"
+
+    def test_interpolate_empty_text(self) -> None:
+        """Empty text returns empty string."""
+        result = builder._interpolate_preview("", [])
+        assert result == ""
+
+    def test_interpolate_no_inputs(self) -> None:
+        """Text with no inputs returns unchanged."""
+        result = builder._interpolate_preview(
+            "Research {topic}", [],
+        )
+        assert result == "Research {topic}"
+
+    def test_interpolate_input_without_default(self) -> None:
+        """Variables without defaults are not replaced."""
+        inputs = [m.InputVar(name="topic", type="str", default=None)]
+        result = builder._interpolate_preview("Research {topic}", inputs)
+        assert result == "Research {topic}"
+
+    def test_interpolate_non_string_default(self) -> None:
+        """Non-string defaults are stringified."""
+        inputs = [m.InputVar(name="count", type="int", default=5)]
+        result = builder._interpolate_preview("Run {count} times", inputs)
+        assert result == "Run 5 times"
+
+    def test_interpolate_variable_repeated(self) -> None:
+        """Same variable appearing multiple times is replaced each time."""
+        inputs = [m.InputVar(name="topic", type="str", default="AI")]
+        result = builder._interpolate_preview("{topic} is the topic. Research {topic}.", inputs)
+        assert result == "AI is the topic. Research AI."
+
+    def test_interpolate_goal_with_variables(self) -> None:
+        """Agent goal with variables interpolates correctly."""
+        inputs = [m.InputVar(name="domain", type="str", default="cybersecurity")]
+        result = builder._interpolate_preview(
+            "Analyze {domain} threats and produce report", inputs,
+        )
+        assert "cybersecurity" in result
+
+    def test_interpolate_backstory_with_variables(self) -> None:
+        """Agent backstory with variables interpolates correctly."""
+        inputs = [m.InputVar(name="company", type="str", default="Acme Corp")]
+        result = builder._interpolate_preview(
+            "Expert researcher at {company} with 10 years experience", inputs,
+        )
+        assert "Acme Corp" in result
+
+    def test_interpolate_escaped_braces_preserved(self) -> None:
+        """Doubled braces {{var}} are not treated as variables."""
+        inputs = [m.InputVar(name="topic", type="str", default="AI")]
+        result = builder._interpolate_preview("Use {{topic}} literally, not {topic}", inputs)
+        assert "{{topic}}" in result
+        assert "AI" in result
+
+
+# ============================================================================
+#  Task 1.28 - Save / Load Persistence
+# ============================================================================
+
+class TestSaveLoad:
+    """Explicit save/load to app.storage.user."""
+
+    def test_save_writes_to_storage(self) -> None:
+        """Saving a crew model persists it to storage."""
+        user = _make_user()
+        with patch.object(
+            Storage, "user", new_callable=PropertyMock, return_value=user
+        ):
+            cm = m.CrewModel(
+                name="Saved Crew",
+                agents=[
+                    m.AgentModel(role="R", goal="Research"),
+                ],
+            )
+            builder._persist(cm)
+            saved = user.get("crew_model")
+            assert saved is not None
+            assert saved["name"] == "Saved Crew"
+            assert len(saved["agents"]) == 1
+
+    def test_load_from_saved_storage(self) -> None:
+        """Loading after save returns the same data."""
+        user = _make_user()
+        with patch.object(
+            Storage, "user", new_callable=PropertyMock, return_value=user
+        ):
+            cm = m.CrewModel(
+                name="Persist Crew",
+                description="Test persistence",
+                agents=[m.AgentModel(role="X", goal="Y")],
+                tasks=[m.TaskModel(name="T", description="D", expected_output="E")],
+            )
+            builder._persist(cm)
+            loaded = builder._crew_model()
+            assert loaded.name == "Persist Crew"
+            assert loaded.description == "Test persistence"
+            assert len(loaded.agents) == 1
+            assert loaded.agents[0].role == "X"
+            assert len(loaded.tasks) == 1
+
+    def test_save_overwrites_previous(self) -> None:
+        """Second save overwrites the first."""
+        user = _make_user()
+        with patch.object(
+            Storage, "user", new_callable=PropertyMock, return_value=user
+        ):
+            cm1 = m.CrewModel(name="First")
+            builder._persist(cm1)
+            cm2 = m.CrewModel(name="Second")
+            builder._persist(cm2)
+            loaded = builder._crew_model()
+            assert loaded.name == "Second"
+
+    def test_save_with_full_crew_dump(self) -> None:
+        """Save includes all crew fields — agents, tasks, inputs, knowledge."""
+        user = _make_user()
+        with patch.object(
+            Storage, "user", new_callable=PropertyMock, return_value=user
+        ):
+            cm = m.CrewModel(
+                name="Full Dump",
+                process="hierarchical",
+                manager_agent_role="Lead",
+                knowledge_sources=[{"name": "Wiki", "kind": "text"}],
+                inputs=[m.InputVar(name="topic", default="AI")],
+                agents=[
+                    m.AgentModel(
+                        role="Lead",
+                        goal="Manage",
+                        llm=m.LLMModel(model="gpt-4o"),
+                        memory=m.MemoryConfig(enabled=True),
+                    ),
+                ],
+            )
+            builder._persist(cm)
+            saved = user["crew_model"]
+            assert saved["name"] == "Full Dump"
+            assert saved["process"] == "hierarchical"
+            assert saved["manager_agent_role"] == "Lead"
+            assert len(saved["knowledge_sources"]) == 1
+            assert len(saved["inputs"]) == 1
+
+    def test_save_load_roundtrip_agent_llm(self) -> None:
+        """Agent with LLM round-trips through storage correctly."""
+        user = _make_user()
+        with patch.object(
+            Storage, "user", new_callable=PropertyMock, return_value=user
+        ):
+            cm = m.CrewModel(
+                name="LLM Roundtrip",
+                agents=[
+                    m.AgentModel(
+                        role="AI",
+                        goal="Think",
+                        llm=m.LLMModel(
+                            model="claude-3-5-sonnet",
+                            temperature=0.3,
+                            base_url="https://api.anthropic.com",
+                        ),
+                    ),
+                ],
+            )
+            builder._persist(cm)
+            loaded = builder._crew_model()
+            assert loaded.agents[0].llm is not None
+            assert loaded.agents[0].llm.model == "claude-3-5-sonnet"
+            assert loaded.agents[0].llm.temperature == 0.3
+
+    def test_save_load_roundtrip_memory_config(self) -> None:
+        """MemoryConfig round-trips through storage."""
+        user = _make_user()
+        with patch.object(
+            Storage, "user", new_callable=PropertyMock, return_value=user
+        ):
+            cm = m.CrewModel(
+                name="Memory RT",
+                memory=m.MemoryConfig(
+                    enabled=True,
+                    recency_weight=0.4,
+                    recency_half_life_days=14,
+                ),
+            )
+            builder._persist(cm)
+            loaded = builder._crew_model()
+            mem = loaded.memory
+            assert isinstance(mem, m.MemoryConfig)
+            assert mem.enabled is True
+            assert mem.recency_weight == 0.4
+            assert mem.recency_half_life_days == 14
+
+    def test_save_load_roundtrip_custom_tool(self) -> None:
+        """Custom ToolRef round-trips through storage."""
+        user = _make_user()
+        with patch.object(
+            Storage, "user", new_callable=PropertyMock, return_value=user
+        ):
+            cm = m.CrewModel(
+                name="Tool RT",
+                agents=[
+                    m.AgentModel(
+                        role="Dev",
+                        goal="Build",
+                        tools=[
+                            m.ToolRef(
+                                kind="custom",
+                                name="MyTool",
+                                args_schema={"param": {"type": "string"}},
+                            ),
+                        ],
+                    ),
+                ],
+            )
+            builder._persist(cm)
+            loaded = builder._crew_model()
+            assert len(loaded.agents[0].tools) == 1
+            tool = loaded.agents[0].tools[0]
+            assert tool.kind == "custom"
+            assert tool.name == "MyTool"
+            assert tool.args_schema is not None
+
+    def test_empty_storage_loads_default(self) -> None:
+        """When storage is empty, a default crew is returned."""
+        user = _make_user()
+        with patch.object(
+            Storage, "user", new_callable=PropertyMock, return_value=user
+        ):
+            cm = builder._crew_model()
+            assert isinstance(cm, m.CrewModel)
+            assert cm.name == "New Crew"
+
+    def test_load_handles_invalid_data_gracefully(self) -> None:
+        """Corrupt storage produces a default and preserves the corrupt data."""
+        user = _make_user({"crew_model": {"name": None, "invalid": True}})
+        with patch.object(
+            Storage, "user", new_callable=PropertyMock, return_value=user
+        ):
+            cm = builder._crew_model()
+            assert cm.name == "New Crew"
+            assert user.get("crew_model_corrupt") is not None

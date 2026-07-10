@@ -13,7 +13,9 @@ Public surface
 from __future__ import annotations
 
 import logging
-from typing import Any
+import re
+from datetime import datetime, timezone
+from typing import Any, Callable
 
 from nicegui import app, ui
 
@@ -47,6 +49,20 @@ BUILTIN_TOOLS: list[dict[str, str]] = [
 # ============================================================================
 
 logger = logging.getLogger(__name__)
+
+
+def _all_tool_options() -> list[dict[str, str]]:
+    """Return combined built-in and custom tool options for selectors."""
+    custom = app.storage.user.get("custom_tools", [])
+    result = list(BUILTIN_TOOLS)
+    for ct in custom:
+        desc = (
+            ct.get("params", {}).get("description", "")
+            if isinstance(ct.get("params"), dict)
+            else ""
+        )
+        result.append({"name": ct["name"], "description": desc, "_custom": "1"})
+    return result
 
 
 def _crew_model() -> m.CrewModel:
@@ -150,6 +166,7 @@ def _render_crew_form(cm: m.CrewModel) -> None:
         cm.planning = refs["planning"].value
         cm.verbose = refs["verbose"].value
         cm.memory = refs["memory_enabled"].value
+        cm.knowledge_sources = ks_ref["data"]
         if cm.process == "hierarchical":
             mgr = refs["manager_agent_role"].value.strip()
             cm.manager_agent_role = mgr if mgr else None
@@ -177,6 +194,28 @@ def _render_crew_form(cm: m.CrewModel) -> None:
 
     _section("Memory")
     refs["memory_enabled"] = ui.switch("Enable Memory", value=bool(cm.memory))
+
+    # Knowledge Sources sub-form
+    _section("Knowledge Sources")
+    ks_ref: dict[str, list[dict[str, Any]]] = {"data": cm.knowledge_sources.copy()}
+    ks_label = ui.label(
+        f"{len(cm.knowledge_sources)} source(s) configured" if cm.knowledge_sources
+        else "No sources configured"
+    ).classes("text-body2 q-ml-sm")
+
+    def _on_ks_saved(new_ks: list[dict[str, Any]]) -> None:
+        ks_ref["data"] = new_ks
+        ks_label.set_text(
+            f"{len(new_ks)} source(s) configured" if new_ks else "No sources configured"
+        )
+
+    ui.button(
+        "Configure Knowledge Sources",
+        icon="menu_book",
+        on_click=lambda: _render_knowledge_sub_form(
+            ks_ref["data"], on_save=_on_ks_saved,
+        ),
+    ).props("flat q-mb-sm")
 
     _section("Hierarchical Settings")
     refs["hierarchical_section"] = ui.column().classes("w-full q-gutter-sm")
@@ -258,7 +297,9 @@ def _render_agent_list(cm: m.CrewModel) -> None:
 
             role = _full_input(label="Role *", value=edit_agent.role)
             goal = _full_input(label="Goal *", value=edit_agent.goal)
+            _render_variable_preview(goal, cm.inputs)
             backstory = _full_textarea(label="Backstory", value=edit_agent.backstory)
+            _render_variable_preview(backstory, cm.inputs)
             allow_del = ui.switch("Allow Delegation", value=edit_agent.allow_delegation)
             allow_code = ui.switch("Allow Code Execution", value=edit_agent.allow_code_execution)
             max_iter = ui.number(
@@ -273,26 +314,66 @@ def _render_agent_list(cm: m.CrewModel) -> None:
             agent_tool_names = {t.name for t in edit_agent.tools}
             tool_selections: dict[str, bool] = {}
             with ui.column().classes("q-gutter-xs w-full"):
-                for tool_info in BUILTIN_TOOLS:
+                for tool_info in _all_tool_options():
                     tname = tool_info["name"]
+                    label = f"{tname} - {tool_info['description']}"
+                    if tool_info.get("_custom"):
+                        label += " (custom)"
                     tool_selections[tname] = ui.checkbox(
-                        f"{tname} - {tool_info['description']}",
+                        label,
                         value=tname in agent_tool_names,
                     )
 
-            # LLM
+            # LLM sub-form button
             _section("LLM Configuration")
-            llm_model = _full_input(
-                label="Model",
-                value=edit_agent.llm.model if edit_agent.llm else "",
-            )
-            llm_temp = ui.number(
-                label="Temperature",
-                value=edit_agent.llm.temperature if edit_agent.llm else None,
-                min=0.0,
-                max=2.0,
-                step=0.1,
-            )
+            llm_ref: dict[str, m.LLMModel | None] = {
+                "data": edit_agent.llm.model_copy(deep=True) if edit_agent.llm else None
+            }
+            llm_btn_label = ui.label(
+                f"Model: {edit_agent.llm.model}" if edit_agent.llm
+                else "Not configured"
+            ).classes("text-body2 q-ml-sm")
+
+            def _on_llm_saved(new_llm: m.LLMModel | None) -> None:
+                llm_ref["data"] = new_llm
+                if new_llm:
+                    llm_btn_label.set_text(f"Model: {new_llm.model}")
+                else:
+                    llm_btn_label.set_text("Not configured")
+
+            ui.button(
+                "Configure LLM",
+                icon="psychology",
+                on_click=lambda: _render_llm_sub_form(
+                    llm_ref["data"],
+                    on_save=_on_llm_saved,
+                    title=f"LLM for {edit_agent.role or 'Agent'}",
+                ),
+            ).props("flat")
+
+            # Memory sub-form button
+            _section("Memory")
+            mem_ref: dict[str, bool | m.MemoryConfig] = {
+                "data": edit_agent.memory.model_copy(deep=True) if isinstance(edit_agent.memory, m.MemoryConfig)
+                else edit_agent.memory
+            }
+            mem_btn_label = ui.label(
+                "Enabled" if edit_agent.memory else "Disabled"
+            ).classes("text-body2 q-ml-sm")
+
+            def _on_mem_saved(new_mem: bool | m.MemoryConfig) -> None:
+                mem_ref["data"] = new_mem
+                mem_btn_label.set_text("Enabled" if new_mem else "Disabled")
+
+            ui.button(
+                "Configure Memory",
+                icon="memory",
+                on_click=lambda: _render_memory_sub_form(
+                    mem_ref["data"],
+                    on_save=_on_mem_saved,
+                    title=f"Memory for {edit_agent.role or 'Agent'}",
+                ),
+            ).props("flat")
 
             def _save_agent() -> None:
                 nonlocal edit_agent
@@ -322,14 +403,11 @@ def _render_agent_list(cm: m.CrewModel) -> None:
                 edit_agent.max_iter = max_iter_val
                 edit_agent.multimodal = multimodal_val
 
-                # LLM
-                if llm_model.value:
-                    edit_agent.llm = m.LLMModel(
-                        model=llm_model.value,
-                        temperature=llm_temp.value if llm_temp.value is not None else None,
-                    )
-                else:
-                    edit_agent.llm = None
+                # LLM from sub-form
+                edit_agent.llm = llm_ref["data"]
+
+                # Memory from sub-form
+                edit_agent.memory = mem_ref["data"]
 
                 # Tools
                 selected = [
@@ -423,7 +501,9 @@ def _render_task_list(cm: m.CrewModel) -> None:
 
             task_name = _full_input(label="Name *", value=edit_task.name)
             task_desc = _full_textarea(label="Description *", value=edit_task.description)
+            _render_variable_preview(task_desc, cm.inputs)
             task_output = _full_textarea(label="Expected Output *", value=edit_task.expected_output)
+            _render_variable_preview(task_output, cm.inputs)
 
             # Agent assignment
             agent_options = {a.role: a.role for a in cm.agents}
@@ -465,10 +545,13 @@ def _render_task_list(cm: m.CrewModel) -> None:
             task_tool_names = {t.name for t in edit_task.tools}
             task_tool_selections: dict[str, ui.checkbox] = {}
             with ui.column().classes("q-gutter-xs w-full"):
-                for tool_info in BUILTIN_TOOLS:
+                for tool_info in _all_tool_options():
                     tname = tool_info["name"]
+                    label = tname
+                    if tool_info.get("_custom"):
+                        label += " (custom)"
                     task_tool_selections[tname] = ui.checkbox(
-                        f"{tname}",
+                        label,
                         value=tname in task_tool_names,
                     )
 
@@ -590,6 +673,878 @@ def _render_tool_catalog() -> None:
     search.on("update:model-value", lambda _: tool_grid.refresh())
     tool_grid()
 
+    # Add custom tool creation button
+    _section("Custom Tools")
+    ui.button(
+        "Add Custom Tool",
+        icon="add",
+        on_click=_open_custom_tool_dialog,
+    ).props(THEME.component.BTN_PRIMARY["props"])
+
+
+def _open_custom_tool_dialog() -> None:
+    """Open a dialog to create a custom tool definition."""
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-md"):
+        ui.label("Create Custom Tool").classes(THEME.typography.SECTION_TITLE)
+        tool_name = _full_input(label="Tool Name *")
+        tool_desc = _full_input(label="Description")
+        args_schema_text = _full_textarea(
+            label="Args Schema (JSON)",
+            value='{\n  "param_name": {"type": "string", "description": "..."}\n}',
+        )
+        ui.label(
+            "Define the tool's Pydantic args_schema as a JSON object. "
+            "Each key is a parameter name with type and description."
+        ).classes("text-caption text-grey-6")
+
+        def _save_custom() -> None:
+            name_val = (tool_name.value or "").strip()
+            if not name_val:
+                ui.notify("Tool name is required", type="negative")
+                return
+            desc_val = tool_desc.value or ""
+            # Parse args_schema
+            schema_val: dict[str, Any] | None = None
+            raw_schema = (args_schema_text.value or "").strip()
+            if raw_schema:
+                import json
+                try:
+                    parsed = json.loads(raw_schema)
+                    if isinstance(parsed, dict):
+                        schema_val = parsed
+                    else:
+                        ui.notify("Args schema must be a JSON object", type="negative")
+                        return
+                except json.JSONDecodeError as exc:
+                    ui.notify(f"Invalid JSON in args schema: {exc}", type="negative")
+                    return
+
+            tool_ref = m.ToolRef(
+                kind="custom",
+                name=name_val,
+                params={"description": desc_val} if desc_val else {},
+                args_schema=schema_val,
+            )
+            # Persist to storage so tool selectors can find it
+            custom_tools = app.storage.user.get("custom_tools", [])
+            custom_tools.append(tool_ref.model_dump())
+            app.storage.user["custom_tools"] = custom_tools
+            ui.notify(
+                f"Custom tool '{name_val}' created. It is now available in the agent/task tool selectors.",
+                type="positive",
+            )
+            dialog.close()
+
+        with ui.row().classes("justify-end q-gutter-sm q-mt-md"):
+            ui.button("Cancel", on_click=dialog.close).props(
+                THEME.component.BTN_SECONDARY["props"]
+            )
+            ui.button("Create Tool", icon="save", on_click=_save_custom).props(
+                THEME.component.BTN_PRIMARY["props"]
+            )
+
+    dialog.open()
+
+
+# ============================================================================
+#  LLM / Memory / Knowledge Sub-forms  (Task 1.24)
+# ============================================================================
+
+def _render_llm_sub_form(
+    existing: m.LLMModel | None,
+    on_save: Callable[[m.LLMModel | None], None],
+    title: str = "LLM Configuration",
+) -> None:
+    """Open a dialog to configure a specific LLM model.
+
+    Args:
+        existing: The current LLM configuration, or *None*.
+        on_save: Called with the new ``LLMModel`` (or *None* to clear).
+        title: Dialog heading.
+    """
+    current = existing.model_copy(deep=True) if existing else m.LLMModel()
+
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-md"):
+        ui.label(title).classes(THEME.typography.SECTION_TITLE)
+
+        model_ref = _full_input(label="Model", value=current.model)
+        temp_ref = ui.number(
+            label="Temperature",
+            value=current.temperature,
+            min=0.0,
+            max=2.0,
+            step=0.1,
+        )
+        base_url_ref = _full_input(label="Base URL", value=current.base_url or "")
+        api_key_ref = _full_input(label="API Key Env Var", value=current.api_key_env or "")
+
+        def _save() -> None:
+            model_val = (model_ref.value or "").strip()
+            if not model_val:
+                ui.notify("Model name is required", type="negative")
+                return
+            new_llm = m.LLMModel(
+                model=model_val,
+                temperature=temp_ref.value if temp_ref.value is not None else None,
+                base_url=base_url_ref.value.strip() or None,
+                api_key_env=api_key_ref.value.strip() or None,
+            )
+            on_save(new_llm)
+            dialog.close()
+
+        with ui.row().classes("justify-end q-gutter-sm q-mt-md"):
+            ui.button(
+                "Clear LLM",
+                on_click=lambda: (on_save(None), dialog.close()),
+            ).props("flat color=negative")
+            ui.button("Cancel", on_click=dialog.close).props(
+                THEME.component.BTN_SECONDARY["props"]
+            )
+            ui.button("Save", icon="save", on_click=_save).props(
+                THEME.component.BTN_PRIMARY["props"]
+            )
+
+    dialog.open()
+
+
+def _render_memory_sub_form(
+    existing: bool | m.MemoryConfig,
+    on_save: Callable[[bool | m.MemoryConfig], None],
+    title: str = "Memory Configuration",
+) -> None:
+    """Open a dialog to configure memory settings for an agent or crew.
+
+    Args:
+        existing: The current memory config (bool or ``MemoryConfig``).
+        on_save: Called with the new config.
+        title: Dialog heading.
+    """
+    is_configured = isinstance(existing, m.MemoryConfig)
+    current = existing if is_configured else m.MemoryConfig()
+
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-md"):
+        ui.label(title).classes(THEME.typography.SECTION_TITLE)
+
+        enabled_ref = ui.switch("Enable Memory", value=is_configured or bool(existing))
+
+        def _update_advanced_visibility() -> None:
+            advanced.set_visibility(enabled_ref.value)
+
+        recency = ui.number(
+            label="Recency Weight",
+            value=current.recency_weight,
+            min=0.0,
+            max=1.0,
+            step=0.1,
+        )
+        semantic = ui.number(
+            label="Semantic Weight",
+            value=current.semantic_weight,
+            min=0.0,
+            max=1.0,
+            step=0.1,
+        )
+        importance = ui.number(
+            label="Importance Weight",
+            value=current.importance_weight,
+            min=0.0,
+            max=1.0,
+            step=0.1,
+        )
+        half_life = ui.number(
+            label="Recency Half-Life (days)",
+            value=current.recency_half_life_days,
+            min=1,
+        )
+
+        advanced = ui.column().classes("w-full q-gutter-sm")
+        with advanced:
+            recency
+            semantic
+            importance
+            half_life
+
+        _update_advanced_visibility()
+        enabled_ref.on("update:model-value", lambda _: _update_advanced_visibility())
+
+        def _save() -> None:
+            if enabled_ref.value:
+                cfg = m.MemoryConfig(
+                    enabled=True,
+                    recency_weight=recency.value if recency.value is not None else None,
+                    semantic_weight=semantic.value if semantic.value is not None else None,
+                    importance_weight=importance.value if importance.value is not None else None,
+                    recency_half_life_days=(
+                        int(half_life.value) if half_life.value is not None else None
+                    ),
+                )
+                on_save(cfg)
+            else:
+                on_save(False)
+            dialog.close()
+
+        with ui.row().classes("justify-end q-gutter-sm q-mt-md"):
+            ui.button("Cancel", on_click=dialog.close).props(
+                THEME.component.BTN_SECONDARY["props"]
+            )
+            ui.button("Save", icon="save", on_click=_save).props(
+                THEME.component.BTN_PRIMARY["props"]
+            )
+
+    dialog.open()
+
+
+def _render_knowledge_sub_form(
+    existing: list[dict[str, Any]],
+    on_save: Callable[[list[dict[str, Any]]], None],
+) -> None:
+    """Open a dialog to manage knowledge sources for a crew.
+
+    Args:
+        existing: The current list of knowledge source dicts.
+        on_save: Called with the updated list.
+    """
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-lg"):
+        ui.label("Knowledge Sources").classes(THEME.typography.SECTION_TITLE)
+
+        # Store plain data only — no UI elements in source_rows
+        source_rows: list[dict[str, Any]] = [
+            {"name": src.get("name", ""), "kind": src.get("kind", "text")}
+            for src in existing
+        ]
+        sources_list = ui.column().classes("w-full q-gutter-sm")
+
+        def _add_source() -> None:
+            source_rows.append({"name": "", "kind": "text"})
+            _refresh_sources()
+
+        def _refresh_sources() -> None:
+            # Extract current values from UI elements before destroying them
+            for row in source_rows:
+                if hasattr(row["name"], "value"):
+                    row["name"] = row["name"].value or ""
+                if hasattr(row["kind"], "value"):
+                    row["kind"] = row["kind"].value or "text"
+            sources_list.clear()
+            with sources_list:
+                for i, row in enumerate(source_rows):
+                    with ui.card().props(THEME.component.CARD["props"]).classes("w-full"):
+                        with ui.row().classes("items-center justify-between w-full"):
+                            row["name"] = _full_input(
+                                label="Source Name", value=row["name"],
+                            )
+                            row["kind"] = _full_select(
+                                label="Kind", options=["string", "text", "pdf"],
+                                value=row["kind"],
+                            )
+                            ui.button(
+                                icon="delete", on_click=lambda idx=i: _remove_source(idx),
+                            ).props(THEME.component.BTN_ICON["props"] + " color=negative")
+
+        def _remove_source(idx: int) -> None:
+            del source_rows[idx]
+            _refresh_sources()
+
+        _refresh_sources()
+
+        ui.button("+ Add Source", icon="add", on_click=_add_source).props("flat")
+
+        def _save() -> None:
+            result: list[dict[str, Any]] = []
+            for row in source_rows:
+                name_val = (row["name"].value or "").strip()
+                if name_val:
+                    result.append({
+                        "name": name_val,
+                        "kind": row["kind"].value,
+                    })
+            on_save(result)
+            dialog.close()
+
+        with ui.row().classes("justify-end q-gutter-sm q-mt-md"):
+            ui.button("Cancel", on_click=dialog.close).props(
+                THEME.component.BTN_SECONDARY["props"]
+            )
+            ui.button("Save Sources", icon="save", on_click=_save).props(
+                THEME.component.BTN_PRIMARY["props"]
+            )
+
+    dialog.open()
+
+
+# ============================================================================
+#  Variable Interpolation Preview  (Task 1.27)
+# ============================================================================
+
+def _interpolate_preview(text: str, inputs: list[m.InputVar]) -> str:
+    """Resolve ``{variable}`` placeholders using input default values.
+
+    Args:
+        text: The text containing ``{var}`` placeholders.
+        inputs: Crew input variable definitions.
+
+    Returns:
+        The text with known variables replaced by their default values.
+        Unknown variables are left as-is.
+    """
+    if not text or not inputs:
+        return text
+    defaults = {v.name: str(v.default) for v in inputs if v.default is not None}
+    if not defaults:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        var_name = match.group(1)
+        if var_name in defaults:
+            return defaults[var_name]
+        return match.group(0)
+
+    return re.sub(r"(?<!\{)\{(\w+)\}(?!\})", _replace, text)
+
+
+def _render_variable_preview(
+    text_ref: ui.input | ui.textarea,
+    inputs: list[m.InputVar],
+) -> ui.label:
+    """Attach a live interpolation preview label to a text input.
+
+    The preview updates on every keystroke and shows how ``{variables}``
+    resolve with the crew's input defaults.
+    """
+    preview_label = ui.label("").classes("text-caption text-grey-6 q-mt-xs")
+
+    def _update_preview() -> None:
+        current = text_ref.value or ""
+        previewed = _interpolate_preview(current, inputs)
+        if previewed and previewed != current:
+            preview_label.set_text(f"Preview: {previewed}")
+        else:
+            preview_label.set_text("")
+
+    text_ref.on("update:model-value", lambda _: _update_preview())
+    _update_preview()
+    return preview_label
+
+
+# ============================================================================
+#  Save / Load Controls  (Task 1.28)
+# ============================================================================
+
+def _render_save_load_bar(cm: m.CrewModel) -> None:
+    """Render an explicit save / load control bar with status indicator."""
+    last_saved_ref = {"timestamp": ""}
+
+    def _do_save() -> None:
+        result = _persist(cm)
+        if result == 0:
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            last_saved_ref["timestamp"] = ts
+            save_status.set_text(f"✓ Saved at {ts}")
+            save_status.classes(
+                remove="text-negative",
+                add="text-positive text-caption",
+            )
+        else:
+            save_status.set_text("✗ Save failed — see validation errors")
+            save_status.classes(
+                remove="text-positive",
+                add="text-negative text-caption",
+            )
+
+    def _do_load() -> None:
+        raw = app.storage.user.get("crew_model")
+        if raw is None:
+            ui.notify("No saved crew found in storage.", type="info")
+            return
+        # Force reload by clearing and re-fetching
+        app.storage.user["crew_model"] = raw
+        ui.notify("Crew loaded from browser storage. Refresh the page to see changes.", type="positive")
+
+    with ui.card().props(THEME.component.CARD["props"]).classes("w-full q-mb-md"):
+        with ui.row().classes("items-center justify-between w-full"):
+            ui.label("Crew Storage").classes(THEME.typography.CARD_TITLE)
+            with ui.row().classes("q-gutter-sm"):
+                ui.button("Save Crew", icon="save", on_click=_do_save).props(
+                    THEME.component.BTN_PRIMARY["props"]
+                )
+                ui.button("Load Crew", icon="refresh", on_click=_do_load).props(
+                    THEME.component.BTN_SECONDARY["props"]
+                )
+
+        save_status = ui.label("").classes("text-caption q-mt-sm")
+        # Show existing save state
+        raw = app.storage.user.get("crew_model")
+        if raw and isinstance(raw, dict) and raw.get("name"):
+            save_status.set_text(f"Current: '{raw['name']}' in storage")
+            save_status.classes(remove="text-negative", add="text-positive text-caption")
+
+
+# ============================================================================
+#  Guided Wizard Mode  (Task 1.25)
+# ============================================================================
+
+# Template definitions for the wizard
+_WIZARD_TEMPLATES: dict[str, dict[str, Any]] = {
+    "blank": {
+        "name": "New Crew",
+        "description": "",
+        "process": "sequential",
+    },
+    "research": {
+        "name": "Research Crew",
+        "description": "A crew that researches topics and produces reports.",
+        "process": "sequential",
+        "agents": [
+            {"role": "Researcher", "goal": "Find comprehensive information on the topic", "backstory": "Expert researcher with years of experience"},
+            {"role": "Writer", "goal": "Produce a well-structured report", "backstory": "Skilled technical writer"},
+        ],
+        "tasks": [
+            {"name": "Research", "description": "Research {topic} thoroughly", "expected_output": "Research findings", "agent_role": "Researcher"},
+            {"name": "Write Report", "description": "Write a report on {topic}", "expected_output": "Final report", "agent_role": "Writer"},
+        ],
+    },
+    "code_review": {
+        "name": "Code Review Crew",
+        "description": "A crew for reviewing and improving code.",
+        "process": "sequential",
+        "agents": [
+            {"role": "Reviewer", "goal": "Identify bugs, security issues, and improvements", "backstory": "Senior engineer with code review expertise"},
+            {"role": "Documenter", "goal": "Document findings and suggestions", "backstory": "Technical documentation specialist"},
+        ],
+        "tasks": [
+            {"name": "Review Code", "description": "Review the provided code for issues", "expected_output": "List of findings", "agent_role": "Reviewer"},
+            {"name": "Document", "description": "Create review summary document", "expected_output": "Review report", "agent_role": "Documenter"},
+        ],
+    },
+}
+
+
+def _render_wizard() -> None:
+    """Render the guided wizard mode — 5-step crew creation flow."""
+    cm = _crew_model()
+    # Wizard state stored transiently during the wizard session
+    wizard_data: dict[str, Any] = {
+        "template": "blank",
+        "name": cm.name,
+        "description": cm.description,
+        "process": cm.process,
+        "agents": [a.model_dump() for a in cm.agents],
+        "tasks": [t.model_dump() for t in cm.tasks],
+        "inputs": [v.model_dump() for v in cm.inputs],
+    }
+
+    # Save/Load bar at top
+    _render_save_load_bar(cm)
+
+    # Step progress indicator
+    step_labels = ["Template", "Goal", "Agents", "Tasks", "Review"]
+    step_ref = {"current": 0}
+
+    # Progress bar
+    progress = ui.linear_progress(value=0.0).classes("w-full q-mb-md")
+    step_label = ui.label("Step 1: Choose Template").classes(
+        THEME.typography.SECTION_TITLE + " q-mb-md"
+    )
+
+    # Step indicator chips
+    with ui.row().classes("q-gutter-sm q-mb-lg w-full justify-center") as step_chips:
+        chip_refs: list[ui.badge] = []
+        for i, sl in enumerate(step_labels):
+            chip = ui.badge(
+                f"{i + 1}. {sl}",
+                color="grey" if i > 0 else "primary",
+            )
+            chip_refs.append(chip)
+
+    def _update_progress() -> None:
+        step = step_ref["current"]
+        progress.set_value((step + 1) / len(step_labels))
+        step_label.set_text(f"Step {step + 1}: {step_labels[step]}")
+        for i, chip in enumerate(chip_refs):
+            if i < step:
+                chip.props("color=positive")
+            elif i == step:
+                chip.props("color=primary")
+            else:
+                chip.props("color=grey")
+
+    # Step content area
+    step_area = ui.column().classes("w-full")
+
+    # Pre-create all steps (visibility toggled)
+    with step_area:
+
+        # --- Step 0: Choose Template ---
+        step0 = ui.column().classes("w-full")
+        with step0:
+            ui.label("Choose a Starting Point").classes(THEME.typography.SECTION_TITLE)
+            ui.label(
+                "Select a template to get started quickly, or begin from scratch."
+            ).classes("text-body2 q-mb-md")
+
+            template_select = _full_select(
+                label="Template",
+                options={
+                    "Blank Crew": "blank",
+                    "Research Crew": "research",
+                    "Code Review Crew": "code_review",
+                },
+                value=wizard_data["template"],
+            )
+
+            with ui.card().props(THEME.component.CARD["props"]).classes("w-full q-mt-md"):
+                template_desc = ui.label("Start with an empty crew — you'll add agents and tasks manually.").classes("text-body2")
+
+            def _update_template_desc() -> None:
+                sel = template_select.value
+                descriptions = {
+                    "blank": "Start with an empty crew — you'll add agents and tasks manually.",
+                    "research": "Researcher + Writer agents with predefined research and report tasks.",
+                    "code_review": "Code Reviewer + Documenter agents with code review workflow.",
+                }
+                template_desc.set_text(descriptions.get(sel, descriptions["blank"]))
+                wizard_data["template"] = sel
+                # Populate agents/tasks from the selected template
+                tmpl = _WIZARD_TEMPLATES.get(sel, _WIZARD_TEMPLATES["blank"])
+                wizard_data["agents"] = [dict(ag) for ag in tmpl.get("agents", [])]
+                wizard_data["tasks"] = [dict(tk) for tk in tmpl.get("tasks", [])]
+                _wizard_agent_list.refresh()
+                _wizard_task_list.refresh()
+
+            template_select.on("update:model-value", lambda _: _update_template_desc())
+
+        # --- Step 1: Goal ---
+        step1 = ui.column().classes("w-full")
+        step1.set_visibility(False)
+        with step1:
+            ui.label("Crew Goal & Identity").classes(THEME.typography.SECTION_TITLE)
+            ui.label(
+                "Define what this crew will do. Keep it simple — "
+                "you can refine details later in Advanced mode."
+            ).classes("text-body2 q-mb-md")
+
+            wizard_name = _full_input(label="Crew Name *", value=wizard_data["name"])
+            wizard_desc = _full_textarea(label="Description", value=wizard_data["description"])
+            wizard_process = _full_select(
+                label="Process Type",
+                options=["sequential", "hierarchical"],
+                value=wizard_data["process"],
+            )
+
+            ui.label(
+                "Sequential: tasks run one after another. "
+                "Hierarchical: a manager agent delegates tasks."
+            ).classes("text-caption text-grey-6")
+
+        # --- Step 2: Agents ---
+        step2 = ui.column().classes("w-full")
+        step2.set_visibility(False)
+        with step2:
+            ui.label("Add Agents").classes(THEME.typography.SECTION_TITLE)
+            ui.label(
+                "Define the agents that will work on your tasks. "
+                "Each agent needs a role, goal, and optionally a backstory."
+            ).classes("text-body2 q-mb-md")
+
+            wizard_agents_col = ui.column().classes("w-full q-gutter-sm")
+
+            @ui.refreshable
+            def _wizard_agent_list() -> None:
+                wizard_agents_col.clear()
+                with wizard_agents_col:
+                    for i, ag in enumerate(wizard_data["agents"]):
+                        with ui.card().props(THEME.component.CARD["props"]).classes("w-full"):
+                            with ui.row().classes("items-center justify-between w-full"):
+                                ui.label(ag.get("role", f"Agent {i + 1}")).classes(THEME.typography.CARD_TITLE)
+                                ui.button(
+                                    icon="delete",
+                                    on_click=lambda idx=i: _remove_wiz_agent(idx),
+                                ).props(THEME.component.BTN_ICON["props"] + " color=negative")
+                            ui.label(f"Goal: {ag.get('goal', '')}").classes("text-body2")
+                            if ag.get("backstory"):
+                                ui.label(f"Backstory: {ag['backstory'][:60]}...").classes("text-caption text-grey-7")
+
+            def _remove_wiz_agent(idx: int) -> None:
+                del wizard_data["agents"][idx]
+                _wizard_agent_list.refresh()
+
+            def _open_wiz_agent_dialog() -> None:
+                with ui.dialog() as dialog, ui.card().classes("w-full max-w-md"):
+                    ui.label("Add Agent").classes(THEME.typography.SECTION_TITLE)
+                    ag_role = _full_input(label="Role *", value="")
+                    ag_goal = _full_input(label="Goal *", value="")
+                    ag_backstory = _full_textarea(label="Backstory", value="")
+                    ag_tools_list = ui.column().classes("q-gutter-xs w-full")
+                    tool_checks: dict[str, ui.checkbox] = {}
+                    ui.label("Tools (optional):").classes("text-body2 q-mt-sm")
+                    with ag_tools_list:
+                        for tool_info in _all_tool_options():
+                            label = tool_info["name"]
+                            if tool_info.get("_custom"):
+                                label += " (custom)"
+                            tool_checks[tool_info["name"]] = ui.checkbox(
+                                label, value=False,
+                            )
+
+                    def _save_wiz_agent() -> None:
+                        role_val = (ag_role.value or "").strip()
+                        goal_val = (ag_goal.value or "").strip()
+                        if not role_val:
+                            ui.notify("Agent role is required", type="negative")
+                            return
+                        if not goal_val:
+                            ui.notify("Agent goal is required", type="negative")
+                            return
+                        sel_tools = [tn for tn, cb in tool_checks.items() if cb.value]
+                        wizard_data["agents"].append({
+                            "role": role_val,
+                            "goal": goal_val,
+                            "backstory": (ag_backstory.value or "").strip(),
+                            "tools": sel_tools,
+                        })
+                        dialog.close()
+                        _wizard_agent_list.refresh()
+
+                    with ui.row().classes("justify-end q-gutter-sm q-mt-md"):
+                        ui.button("Cancel", on_click=dialog.close).props(
+                            THEME.component.BTN_SECONDARY["props"]
+                        )
+                        ui.button("Add Agent", icon="add", on_click=_save_wiz_agent).props(
+                            THEME.component.BTN_PRIMARY["props"]
+                        )
+                dialog.open()
+
+            _wizard_agent_list()
+            ui.button("+ Add Agent", icon="add", on_click=_open_wiz_agent_dialog).props(
+                THEME.component.BTN_PRIMARY["props"] + " q-mt-sm"
+            )
+
+        # --- Step 3: Tasks ---
+        step3 = ui.column().classes("w-full")
+        step3.set_visibility(False)
+        with step3:
+            ui.label("Define Tasks").classes(THEME.typography.SECTION_TITLE)
+            ui.label(
+                "Define the tasks your agents will execute. "
+                "Each task needs a name, description, and expected output."
+            ).classes("text-body2 q-mb-md")
+
+            wizard_tasks_col = ui.column().classes("w-full q-gutter-sm")
+
+            @ui.refreshable
+            def _wizard_task_list() -> None:
+                wizard_tasks_col.clear()
+                with wizard_tasks_col:
+                    for i, tk in enumerate(wizard_data["tasks"]):
+                        with ui.card().props(THEME.component.CARD["props"]).classes("w-full"):
+                            with ui.row().classes("items-center justify-between w-full"):
+                                ui.label(tk.get("name", f"Task {i + 1}")).classes(THEME.typography.CARD_TITLE)
+                                ui.button(
+                                    icon="delete",
+                                    on_click=lambda idx=i: _remove_wiz_task(idx),
+                                ).props(THEME.component.BTN_ICON["props"] + " color=negative")
+                            ui.label(f"Agent: {tk.get('agent_role', '(unassigned)')}").classes("text-body2")
+                            ui.label(f"Desc: {tk.get('description', '')[:60]}...").classes("text-caption text-grey-7")
+
+            def _remove_wiz_task(idx: int) -> None:
+                del wizard_data["tasks"][idx]
+                _wizard_task_list.refresh()
+
+            def _open_wiz_task_dialog() -> None:
+                agent_opts = {"(unassigned)": ""}
+                for ag in wizard_data["agents"]:
+                    agent_opts[ag["role"]] = ag["role"]
+
+                with ui.dialog() as dialog, ui.card().classes("w-full max-w-md"):
+                    ui.label("Add Task").classes(THEME.typography.SECTION_TITLE)
+                    tk_name = _full_input(label="Name *", value="")
+                    tk_desc = _full_textarea(label="Description *", value="")
+                    tk_output = _full_textarea(label="Expected Output *", value="")
+                    tk_agent = _full_select(label="Assigned Agent", options=agent_opts, value="")
+
+                    def _save_wiz_task() -> None:
+                        name_val = (tk_name.value or "").strip()
+                        desc_val = (tk_desc.value or "").strip()
+                        output_val = (tk_output.value or "").strip()
+                        if not name_val:
+                            ui.notify("Task name is required", type="negative")
+                            return
+                        if not desc_val:
+                            ui.notify("Task description is required", type="negative")
+                            return
+                        if not output_val:
+                            ui.notify("Expected output is required", type="negative")
+                            return
+                        wizard_data["tasks"].append({
+                            "name": name_val,
+                            "description": desc_val,
+                            "expected_output": output_val,
+                            "agent_role": tk_agent.value or None,
+                        })
+                        dialog.close()
+                        _wizard_task_list.refresh()
+
+                    with ui.row().classes("justify-end q-gutter-sm q-mt-md"):
+                        ui.button("Cancel", on_click=dialog.close).props(
+                            THEME.component.BTN_SECONDARY["props"]
+                        )
+                        ui.button("Add Task", icon="add", on_click=_save_wiz_task).props(
+                            THEME.component.BTN_PRIMARY["props"]
+                        )
+                dialog.open()
+
+            _wizard_task_list()
+            ui.button("+ Add Task", icon="add", on_click=_open_wiz_task_dialog).props(
+                THEME.component.BTN_PRIMARY["props"] + " q-mt-sm"
+            )
+
+        # --- Step 4: Review & Save ---
+        step4 = ui.column().classes("w-full")
+        step4.set_visibility(False)
+        with step4:
+            ui.label("Review & Save").classes(THEME.typography.SECTION_TITLE)
+            ui.label(
+                "Review your crew configuration below. "
+                "Click 'Save Crew' to persist it, or go back to adjust."
+            ).classes("text-body2 q-mb-md")
+
+            review_card = ui.card().props(THEME.component.CARD["props"]).classes("w-full")
+
+    # All step containers for easy visibility control
+    all_steps = [step0, step1, step2, step3, step4]
+
+    def _show_step(n: int) -> None:
+        for i, s in enumerate(all_steps):
+            s.set_visibility(i == n)
+        step_ref["current"] = n
+        _update_progress()
+        # Update review card on step 4
+        if n == 4:
+            _refresh_review()
+
+    def _refresh_review() -> None:
+        review_card.clear()
+        with review_card:
+            ui.label(f"Crew: {wizard_data['name']}").classes(THEME.typography.CARD_TITLE)
+            ui.label(f"Process: {wizard_data['process']}").classes("text-body2")
+            if wizard_data["description"]:
+                ui.label(f"Description: {wizard_data['description']}").classes("text-body2")
+
+            ui.separator().classes("q-my-sm")
+            ui.label(f"Agents ({len(wizard_data['agents'])})").classes(THEME.typography.CARD_TITLE)
+            for ag in wizard_data["agents"]:
+                ui.label(f"• {ag['role']} — {ag['goal'][:50]}...").classes("text-body2")
+
+            ui.separator().classes("q-my-sm")
+            ui.label(f"Tasks ({len(wizard_data['tasks'])})").classes(THEME.typography.CARD_TITLE)
+            for tk in wizard_data["tasks"]:
+                ui.label(f"• {tk['name']} → {tk.get('agent_role', 'unassigned')}").classes("text-body2")
+
+    def _apply_wizard_to_model() -> None:
+        """Convert wizard data back to CrewModel and persist.
+
+        Builds a new CrewModel from wizard data, validates + persists it,
+        and only mutates the live ``cm`` on success — never corrupts
+        the in-memory model on validation failure.
+        """
+        # Build agents from wizard data
+        agents = [
+            m.AgentModel(
+                role=ag_data["role"],
+                goal=ag_data["goal"],
+                backstory=ag_data.get("backstory", ""),
+                tools=[
+                    m.ToolRef(kind="builtin", name=tn)
+                    for tn in ag_data.get("tools", [])
+                ],
+            )
+            for ag_data in wizard_data["agents"]
+        ]
+
+        # Build tasks from wizard data
+        tasks = [
+            m.TaskModel(
+                name=tk_data["name"],
+                description=tk_data["description"],
+                expected_output=tk_data["expected_output"],
+                agent_role=tk_data.get("agent_role"),
+            )
+            for tk_data in wizard_data["tasks"]
+        ]
+
+        # Build new CrewModel and persist — validates everything
+        new_cm = m.CrewModel(
+            name=wizard_data["name"],
+            description=wizard_data["description"],
+            process=wizard_data["process"],  # type: ignore[arg-type]
+            agents=agents,
+            tasks=tasks,
+        )
+        if _persist(new_cm) != 0:
+            return  # error notification handled inside _persist
+
+        # Only mutate live cm on success
+        cm.name = new_cm.name
+        cm.description = new_cm.description
+        cm.process = new_cm.process  # type: ignore[assignment]
+        cm.agents.clear()
+        cm.agents.extend(new_cm.agents)
+        cm.tasks.clear()
+        cm.tasks.extend(new_cm.tasks)
+        ui.notify(
+            f"Crew '{cm.name}' saved! Switch to Advanced mode for detailed editing.",
+            type="positive",
+            position="top",
+        )
+
+    # --- Navigation buttons ---
+    with ui.row().classes("w-full justify-between q-mt-lg"):
+        prev_btn = ui.button("← Back", on_click=lambda: _show_step(max(0, step_ref["current"] - 1))).props(
+            THEME.component.BTN_SECONDARY["props"]
+        )
+        prev_btn.set_visibility(False)
+
+        next_btn = ui.button("Next →", on_click=lambda: _navigate_next()).props(
+            THEME.component.BTN_PRIMARY["props"]
+        )
+
+        save_btn = ui.button("Save Crew ✓", icon="save", on_click=_apply_wizard_to_model).props(
+            "unelevated color=positive"
+        )
+        save_btn.set_visibility(False)
+
+    def _navigate_next() -> None:
+        step = step_ref["current"]
+        if step < len(all_steps) - 1:
+            _show_step(step + 1)
+            if step + 1 == len(all_steps) - 1:
+                next_btn.set_visibility(False)
+                save_btn.set_visibility(True)
+            prev_btn.set_visibility(True)
+
+    def _handle_step_visibility() -> None:
+        step = step_ref["current"]
+        prev_btn.set_visibility(step > 0)
+        if step == len(all_steps) - 1:
+            next_btn.set_visibility(False)
+            save_btn.set_visibility(True)
+        else:
+            next_btn.set_visibility(True)
+            save_btn.set_visibility(False)
+
+    # Override _show_step to also handle button visibility
+    _orig_show_step = _show_step
+    def _show_step_wrapped(n: int) -> None:
+        _orig_show_step(n)
+        _handle_step_visibility()
+
+    # Replace _show_step in the prev/next button closures by reassignment hack
+    # (the prev_btn/next_btn already captured _show_step; we update the global ref)
+    show_step_ref: dict[str, Callable[[int], None]] = {"fn": _show_step_wrapped}
+
+    # Show step 1 initially
+    _show_step_wrapped(0)
+
 
 # ============================================================================
 #  Main Builder Entry Point
@@ -602,18 +1557,55 @@ def render_builder() -> None:
     """
     cm = _crew_model()
 
-    with ui.tabs().classes("w-full") as tabs:
-        crew_tab = ui.tab("Crew", icon="group")
-        agents_tab = ui.tab("Agents", icon="person")
-        tasks_tab = ui.tab("Tasks", icon="checklist")
-        tools_tab = ui.tab("Tools", icon="build")
+    # Mode toggle: Wizard vs Advanced
+    mode_ref = {"mode": "advanced"}  # default to advanced
 
-    with ui.tab_panels(tabs, value=crew_tab).classes("w-full q-mt-md"):
-        with ui.tab_panel(crew_tab):
-            _render_crew_form(cm)
-        with ui.tab_panel(agents_tab):
-            _render_agent_list(cm)
-        with ui.tab_panel(tasks_tab):
-            _render_task_list(cm)
-        with ui.tab_panel(tools_tab):
-            _render_tool_catalog()
+    with ui.row().classes("w-full items-center justify-between q-mb-md"):
+        ui.label(f"Crew Builder — {cm.name}").classes(THEME.typography.SECTION_TITLE)
+        with ui.row().classes("q-gutter-sm"):
+            mode_toggle = ui.toggle(
+                options={"Advanced": "advanced", "Wizard": "wizard"},
+                value="advanced",
+            )
+
+    # Save/Load bar (always visible)
+    _render_save_load_bar(cm)
+
+    # Mode-specific content area
+    wizard_container = ui.column().classes("w-full")
+    advanced_container = ui.column().classes("w-full")
+
+    with advanced_container:
+        with ui.tabs().classes("w-full") as tabs:
+            crew_tab = ui.tab("Crew", icon="group")
+            agents_tab = ui.tab("Agents", icon="person")
+            tasks_tab = ui.tab("Tasks", icon="checklist")
+            tools_tab = ui.tab("Tools", icon="build")
+
+        with ui.tab_panels(tabs, value=crew_tab).classes("w-full q-mt-md"):
+            with ui.tab_panel(crew_tab):
+                _render_crew_form(cm)
+            with ui.tab_panel(agents_tab):
+                _render_agent_list(cm)
+            with ui.tab_panel(tasks_tab):
+                _render_task_list(cm)
+            with ui.tab_panel(tools_tab):
+                _render_tool_catalog()
+
+    with wizard_container:
+        wizard_container.set_visibility(False)
+
+    def _switch_mode() -> None:
+        val = mode_toggle.value
+        mode_ref["mode"] = val
+        if val == "wizard":
+            advanced_container.set_visibility(False)
+            wizard_container.clear()
+            with wizard_container:
+                _render_wizard()
+            wizard_container.set_visibility(True)
+        else:
+            wizard_container.set_visibility(False)
+            advanced_container.set_visibility(True)
+
+    mode_toggle.on("update:model-value", lambda _: _switch_mode())
