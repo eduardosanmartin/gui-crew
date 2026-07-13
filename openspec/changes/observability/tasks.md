@@ -44,9 +44,9 @@ Chain strategy: feature-branch-chain
 
 ## Phase 4: PR 6 — Micro + Resource + Error
 
-- [ ] 4.1 Implement `_render_micro` with direct DOM mutation for token streaming; apply `Token.THINKING` (italic/dimmed) vs `Token.ANSWER` styles; show tokens/sec and cumulative count
-- [ ] 4.2 Implement `_render_resource` with per-task table (tokens in+out, cost, duration, iterations); show "—" until `resource.update` arrives
-- [ ] 4.3 Implement `_render_error` with traceback display; filter to guardrail retries only; show attempt counters
+- [x] 4.1 Implement `_render_micro` with direct DOM mutation for token streaming; apply `Token.THINKING` (italic/dimmed) vs `Token.ANSWER` styles; show tokens/sec and cumulative count
+- [x] 4.2 Implement `_render_resource` with per-task table (tokens in+out, cost, duration, iterations); show "—" until `resource.update` arrives
+- [x] 4.3 Implement `_render_error` with traceback display; filter to guardrail retries only; show attempt counters
 
 ## Phase 5: Testing
 

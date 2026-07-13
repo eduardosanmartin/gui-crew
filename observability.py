@@ -21,6 +21,7 @@ execution context.
 
 from __future__ import annotations
 
+import html as _html
 import time
 from collections import deque
 from typing import Any
@@ -59,7 +60,28 @@ _resources: dict[str, dict[str, Any]] = {}
 """crew_id → {task_name: {tokens_in, tokens_out, cost, duration, iterations}}."""
 
 _errors: dict[str, list[dict[str, Any]]] = {}
-"""crew_id → list of error entries with tracebacks (guardrail retries only)."""
+"""crew_id → list of error entries with tracebacks (guardrail retries + task failures)."""
+
+_token_stats: dict[str, dict[str, Any]] = {}
+"""crew_id → {tokens_per_sec, token_count, token_timestamps} for rate calculation."""
+
+_token_displays: dict[str, Any] = {}
+"""crew_id → ui.html element for direct DOM mutation of the token stream."""
+
+_tps_labels: dict[str, Any] = {}
+"""crew_id → ui.label element showing the live tokens/sec metric."""
+
+_token_count_labels: dict[str, Any] = {}
+"""crew_id → ui.label element showing the cumulative token count."""
+
+_head_html_injected: bool = False
+"""Guard so ``ui.add_head_html`` for token styles runs only once."""
+
+
+def _escape_html(text: str) -> str:
+    """Escape *text* for safe injection into an HTML element."""
+    return _html.escape(text, quote=False)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Reconnect buffer
@@ -124,6 +146,8 @@ def _route_event(crew_id: str, event: ProtocolEvent) -> None:
     # -- Macro layer: crew & task lifecycle ---------------------------------
     if event_type.startswith("crew.") or event_type.startswith("task."):
         _update_crew_state(crew_id, event)
+        if event_type in ("task.failed", "crew.error"):
+            _update_errors(crew_id, event)
 
     # -- Guardrail events — affect both crew state and error log -------------
     elif event_type.startswith("guardrail."):
@@ -359,14 +383,72 @@ def _update_activity_log(crew_id: str, event: ProtocolEvent) -> None:
 
 
 def _handle_token(crew_id: str, event: ProtocolEvent) -> None:
-    """Buffer a streaming token for the micro panel."""
-    elements = _token_elements.setdefault(crew_id, [])
-    elements.append({
-        "ts": event.get("ts", time.time()),
+    """Buffer a streaming token and update the micro panel via direct DOM.
+
+    On each ``token.stream`` event this handler:
+
+    1. Stores the token in ``_token_elements[crew_id]`` for replay.
+    2. Updates the sliding-window tokens/sec metric.
+    3. Appends a styled ``<span>`` directly to the streaming ``ui.html``
+       element if one has been created by ``_render_micro``.
+    """
+    global _head_html_injected
+
+    token_text = event.get("text", "")
+    is_thinking = event.get("is_thinking", False)
+    ts = event.get("ts", time.time())
+
+    # -- State: store token --------------------------------------------------
+    _token_elements.setdefault(crew_id, []).append({
+        "ts": ts,
         "agent_role": event.get("agent_role", ""),
-        "is_thinking": event.get("is_thinking", False),
-        "text": event.get("text", ""),
+        "is_thinking": is_thinking,
+        "text": token_text,
     })
+
+    # -- Stats: tokens/sec + cumulative count --------------------------------
+    stats = _token_stats.setdefault(crew_id, {
+        "tokens_per_sec": 0.0,
+        "token_count": 0,
+        "token_timestamps": [],
+        "last_ts": ts,
+    })
+    stats["token_count"] += 1
+    stats["token_timestamps"].append(ts)
+    # Keep a sliding window of the last 100 tokens for rate calculation.
+    if len(stats["token_timestamps"]) > 100:
+        stats["token_timestamps"] = stats["token_timestamps"][-100:]
+    if len(stats["token_timestamps"]) >= 2:
+        window = stats["token_timestamps"][-1] - stats["token_timestamps"][0]
+        if window > 0:
+            stats["tokens_per_sec"] = (len(stats["token_timestamps"]) - 1) / window
+
+    # -- Direct DOM mutation -------------------------------------------------
+    display = _token_displays.get(crew_id)
+    if display is not None:
+        try:
+            style_cls = "token-thinking" if is_thinking else "token-answer"
+            escaped = _escape_html(token_text)
+            span = f'<span class="{style_cls}">{escaped}</span>'
+            current = getattr(display, "content", "") or ""
+            display.set_content(current + span)
+        except Exception:
+            pass  # Graceful degradation when UI element is not connected.
+
+    # -- Update metric labels ------------------------------------------------
+    tps_label = _tps_labels.get(crew_id)
+    if tps_label is not None:
+        try:
+            tps_label.set_text(f"{stats['tokens_per_sec']:.1f} tokens/sec")
+        except Exception:
+            pass
+
+    count_label = _token_count_labels.get(crew_id)
+    if count_label is not None:
+        try:
+            count_label.set_text(f"{stats['token_count']} tokens")
+        except Exception:
+            pass
 
 
 def _update_resources(crew_id: str, event: ProtocolEvent) -> None:
@@ -380,6 +462,7 @@ def _update_resources(crew_id: str, event: ProtocolEvent) -> None:
         "duration": 0.0,
         "iterations": 0,
         "model": "",
+        "agent": "",
     })
 
     if event.get("type") == "resource.update":
@@ -389,19 +472,40 @@ def _update_resources(crew_id: str, event: ProtocolEvent) -> None:
         entry["duration"] = event.get("duration", 0.0)
         entry["iterations"] = event.get("iterations", 0)
         entry["model"] = event.get("model", "")
+        if event.get("agent_role"):
+            entry["agent"] = event["agent_role"]
 
 
 def _update_errors(crew_id: str, event: ProtocolEvent) -> None:
-    """Append a guardrail error entry."""
+    """Append an error entry — guardrail retry or task/crew failure.
+
+    Each entry carries a ``type`` field (``guardrail_retry`` | ``error``)
+    so the renderer can differentiate retry counters from final failures.
+    """
     errors = _errors.setdefault(crew_id, [])
-    errors.append({
-        "ts": event.get("ts", time.time()),
-        "guardrail_name": event.get("guardrail_name", ""),
-        "task_name": event.get("task_name", ""),
-        "error": event.get("error", ""),
-        "attempt": event.get("attempt", 1),
-        "traceback": event.get("traceback"),
-    })
+    event_type = event.get("type", "")
+
+    if event_type == "guardrail.failed":
+        errors.append({
+            "ts": event.get("ts", time.time()),
+            "type": "guardrail_retry",
+            "guardrail_name": event.get("guardrail_name", ""),
+            "task_name": event.get("task_name", ""),
+            "agent_role": event.get("agent_role", ""),
+            "message": event.get("error", "Guardrail validation failed"),
+            "attempt": event.get("attempt", 1),
+            "max_retries": event.get("max_retries", 3),
+            "traceback": event.get("traceback"),
+        })
+    elif event_type in ("task.failed", "crew.error"):
+        errors.append({
+            "ts": event.get("ts", time.time()),
+            "type": "error",
+            "task_name": event.get("task_name", ""),
+            "agent_role": event.get("agent_role", ""),
+            "message": event.get("error", "Unknown error"),
+            "traceback": event.get("traceback"),
+        })
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -650,6 +754,254 @@ def _render_meso(crew_id: str) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  Micro Panel — token-level streaming with direct DOM mutation
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _render_micro(crew_id: str) -> None:
+    """Render the micro-layer token streaming panel.
+
+    This panel is **not** ``@ui.refreshable`` — it uses direct DOM mutation
+    via ``_handle_token`` to append styled ``<span>`` elements to a ``ui.html``
+    container.  On initial render any already-buffered tokens are replayed
+    into the display so the panel is not blank after a reconnect.
+
+    Styles are injected once via ``ui.add_head_html`` and follow the
+    ``styles.Token.THINKING`` / ``styles.Token.ANSWER`` colour palette.
+    """
+    global _head_html_injected
+
+    if not _head_html_injected:
+        ui.add_head_html(
+            "<style>"
+            ".token-thinking { font-style: italic; opacity: 0.7; color: #757575; }"
+            ".token-answer { opacity: 1; color: #212121; }"
+            ".token-stream { font-family: monospace; white-space: pre-wrap; "
+            "word-break: break-word; }"
+            "</style>"
+        )
+        _head_html_injected = True
+
+    with ui.card().classes("w-full q-pa-md rounded-borders"):
+        # -- Header with metrics ----------------------------------------------
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("Token Stream").classes("text-h6 font-bold")
+
+            with ui.row().classes("items-center gap-4"):
+                tps_label = ui.label("0.0 tokens/sec").classes(
+                    "text-caption text-grey"
+                )
+                _tps_labels[crew_id] = tps_label
+
+                count_label = ui.label("0 tokens").classes(
+                    "text-caption text-grey"
+                )
+                _token_count_labels[crew_id] = count_label
+
+        # -- Streaming container (direct mutation target) --------------------
+        with ui.scroll_area().classes("h-64 border rounded p-2 q-mt-sm"):
+            token_html = ui.html("").classes("token-stream")
+            _token_displays[crew_id] = token_html
+
+        # -- Replay buffered tokens into the initial display ------------------
+        tokens = _token_elements.get(crew_id, [])
+        if tokens:
+            parts: list[str] = []
+            for t in tokens:
+                cls = "token-thinking" if t.get("is_thinking") else "token-answer"
+                parts.append(
+                    f'<span class="{cls}">{_escape_html(t.get("text", ""))}</span>'
+                )
+            try:
+                token_html.set_content("".join(parts))
+            except Exception:
+                pass
+
+        # -- Restore metric values from stats ---------------------------------
+        stats = _token_stats.get(crew_id, {})
+        if stats.get("tokens_per_sec"):
+            try:
+                tps_label.set_text(
+                    f"{stats['tokens_per_sec']:.1f} tokens/sec"
+                )
+            except Exception:
+                pass
+        if stats.get("token_count"):
+            try:
+                count_label.set_text(f"{stats['token_count']} tokens")
+            except Exception:
+                pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Resource Panel — per-task consumption table
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@ui.refreshable
+def _render_resource(crew_id: str) -> None:
+    """Render the per-task resource consumption table.
+
+    Columns: Task, Agent, Duration, Tokens In, Tokens Out, Est. Cost, Iterations.
+    Cost shows "—" when no exact ``resource.update`` has arrived.
+    A total-cost summary is displayed below the table.
+    """
+    resources = _resources.get(crew_id, {})
+
+    with ui.card().classes("w-full q-pa-md rounded-borders"):
+        ui.label("Resource Consumption").classes("text-h6 font-bold q-mb-sm")
+
+        if not resources:
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("receipt_long", color="grey-5")
+                ui.label("No resource data yet").classes(
+                    "text-caption text-grey"
+                )
+            return
+
+        # -- Build table rows ------------------------------------------------
+        columns: list[dict[str, str]] = [
+            {"name": "task", "label": "Task", "field": "task", "align": "left"},
+            {"name": "agent", "label": "Agent", "field": "agent", "align": "left"},
+            {"name": "duration", "label": "Duration", "field": "duration"},
+            {"name": "tokens_in", "label": "Tokens In", "field": "tokens_in"},
+            {"name": "tokens_out", "label": "Tokens Out", "field": "tokens_out"},
+            {"name": "cost", "label": "Est. Cost", "field": "cost"},
+            {"name": "iterations", "label": "Iters", "field": "iterations"},
+        ]
+
+        total_cost = 0.0
+        rows: list[dict[str, Any]] = []
+        for task_name, data in resources.items():
+            cost = data.get("cost")
+            cost_display = f"${cost:.4f}" if cost is not None else "—"
+            if cost is not None:
+                total_cost += cost
+
+            rows.append({
+                "task": task_name,
+                "agent": data.get("agent", data.get("agent_role", "")),
+                "duration": _fmt_duration(data.get("duration", 0)),
+                "tokens_in": data.get("tokens_in", 0),
+                "tokens_out": data.get("tokens_out", 0),
+                "cost": cost_display,
+                "iterations": data.get("iterations", 0),
+            })
+
+        ui.table(columns=columns, rows=rows).classes("w-full q-mb-sm")
+
+        # -- Total cost -------------------------------------------------------
+        total_display = f"${total_cost:.4f}" if total_cost > 0 else "—"
+        with ui.row().classes("w-full justify-end"):
+            ui.label(f"Total Cost: {total_display}").classes(
+                "font-bold text-green-700"
+            )
+
+
+def _fmt_duration(duration: float) -> str:
+    """Format a duration in seconds as a human-readable string."""
+    if duration >= 60:
+        return f"{duration / 60:.1f}m"
+    if duration >= 1:
+        return f"{duration:.1f}s"
+    return f"{int(duration * 1000)}ms"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Error Panel — guardrail retries + task failures
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@ui.refreshable
+def _render_error(crew_id: str) -> None:
+    """Render error cards with tracebacks and guardrail retry counters.
+
+    Only explicit guardrail retries and task/crew failures are displayed.
+    Internal CrewAI tool retries are naturally filtered — they never reach
+    ``_update_errors``.
+    """
+    errors = _errors.get(crew_id, [])
+
+    with ui.card().classes("w-full q-pa-md rounded-borders"):
+        ui.label("Errors & Retries").classes("text-h6 font-bold q-mb-sm")
+
+        if not errors:
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("check_circle", color="grey-5")
+                ui.label("No errors").classes("text-caption text-grey")
+            return
+
+        # Newest first
+        for entry in reversed(errors):
+            entry_type = entry.get("type", "error")
+
+            if entry_type == "guardrail_retry":
+                _render_guardrail_card(entry)
+            else:
+                _render_error_card(entry)
+
+
+def _render_guardrail_card(entry: dict[str, Any]) -> None:
+    """Render a guardrail retry card with attempt counter."""
+    attempt = entry.get("attempt", 1)
+    max_retries = entry.get("max_retries", 3)
+
+    with ui.card().classes("mb-2 p-3 border-l-4 border-orange-500 bg-orange-50"):
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("refresh", color="orange").classes("text-h6")
+            ui.label(
+                f"Guardrail Retry ({attempt}/{max_retries})"
+            ).classes("font-bold text-orange-700")
+
+        if entry.get("guardrail_name"):
+            ui.label(
+                f"Guardrail: {entry['guardrail_name']}"
+            ).classes("text-caption text-orange-600")
+
+        if entry.get("agent_role") or entry.get("task_name"):
+            parts = []
+            if entry.get("agent_role"):
+                parts.append(f"Agent: {entry['agent_role']}")
+            if entry.get("task_name"):
+                parts.append(f"Task: {entry['task_name']}")
+            ui.label(" · ".join(parts)).classes("text-xs text-grey")
+
+        ui.label(entry.get("message", "")).classes("text-sm q-mt-xs")
+
+        traceback = entry.get("traceback")
+        if traceback:
+            with ui.expansion("Show traceback").classes("text-xs"):
+                ui.label(traceback).classes(
+                    "font-mono text-xs whitespace-pre-wrap"
+                )
+
+
+def _render_error_card(entry: dict[str, Any]) -> None:
+    """Render a task/crew error card with traceback."""
+    with ui.card().classes("mb-2 p-3 border-l-4 border-red-500 bg-red-50"):
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("error", color="red").classes("text-h6")
+            ui.label("Error").classes("font-bold text-red-700")
+
+        parts = []
+        if entry.get("agent_role"):
+            parts.append(f"Agent: {entry['agent_role']}")
+        if entry.get("task_name"):
+            parts.append(f"Task: {entry['task_name']}")
+        if parts:
+            ui.label(" · ".join(parts)).classes("text-xs text-grey")
+
+        ui.label(entry.get("message", "")).classes("text-sm q-mt-xs")
+
+        traceback = entry.get("traceback")
+        if traceback:
+            with ui.expansion("Show traceback").classes("text-xs"):
+                ui.label(traceback).classes(
+                    "font-mono text-xs whitespace-pre-wrap"
+                )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  Empty State — shown when no active crew
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -693,3 +1045,18 @@ def render_observability(crew_id: str | None = None) -> None:
 
     # Meso layer — agent / tool / delegation / memory / knowledge cards
     _render_meso(crew_id)
+
+    ui.separator()
+
+    # Micro layer — token streaming (direct DOM mutation)
+    _render_micro(crew_id)
+
+    ui.separator()
+
+    # Resource layer — per-task consumption table
+    _render_resource(crew_id)
+
+    ui.separator()
+
+    # Error layer — guardrail retries + task failures
+    _render_error(crew_id)
