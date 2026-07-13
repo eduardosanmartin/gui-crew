@@ -7,6 +7,7 @@ protocol and execution handle but never reaches CrewAI types directly.
 Public surface
 --------------
 * ``Adapter`` — converts Pydantic models ↔ CrewAI instances.
+* ``CallbackRouter`` — expands builder callback template IDs to Python callables.
 * ``BridgeListener`` — registers on ``crewai_event_bus``, translates CrewAI
   events → flat JSON protocol dicts with ``crew_id``.
 * ``CrewEngine`` — spawns background-thread executions, exposes ``run`` /
@@ -20,6 +21,7 @@ Public surface
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 import traceback
@@ -350,6 +352,188 @@ def _json_schema_to_pydantic_model(schema: dict) -> type:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  CallbackRouter  —  template IDs → Python callables
+# ═══════════════════════════════════════════════════════════════════════════
+
+class CallbackRouter:
+    """Expand builder callback template IDs to actual Python callables.
+
+    The builder stores callbacks as template IDs (e.g. ``"log_to_file"``)
+    so that they survive serialization.  This class expands those IDs to
+    real ``Callable`` objects with error-safe wrappers before they are
+    passed to CrewAI.
+
+    Every wrapper catches exceptions and logs them — callbacks MUST NOT
+    break crew execution.
+
+    Built-in templates
+    ------------------
+    * ``log_to_file`` — appends callback invocation details to a file.
+    * ``print_to_console`` — prints invocation details to stdout.
+    * ``send_webhook`` — stub that logs what *would* be sent (no actual HTTP).
+    """
+
+    _LOG = logging.getLogger(__name__)
+
+    # ------------------------------------------------------------------ #
+    #  Template factories — each returns a callable (static methods so
+    #  they can be stored directly in the registry).
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _log_to_file(config: dict | None = None) -> Callable[..., None]:
+        config = config or {}
+        filepath = config.get("filepath", "crew_callback.log")
+
+        # Path traversal protection: validate the path
+        from pathlib import Path
+        try:
+            path = Path(filepath)
+            # Only validate relative paths - absolute paths are explicitly provided by user
+            if not path.is_absolute():
+                resolved = path.resolve()
+                cwd = Path.cwd().resolve()
+                # Block relative paths that escape CWD
+                if not str(resolved).startswith(str(cwd)):
+                    CallbackRouter._LOG.warning(
+                        "log_to_file: filepath '%s' resolves outside safe directory, "
+                        "using default 'crew_callback.log'", filepath
+                    )
+                    filepath = "crew_callback.log"
+        except Exception:
+            CallbackRouter._LOG.warning(
+                "log_to_file: invalid filepath '%s', using default", filepath
+            )
+            filepath = "crew_callback.log"
+
+        def callback(*args: Any, **kwargs: Any) -> None:
+            try:
+                with open(filepath, "a", encoding="utf-8") as fh:
+                    fh.write(f"[{time.time()}] Callback invoked: "
+                             f"args={args}, kwargs={kwargs}\n")
+            except Exception:
+                CallbackRouter._LOG.exception(
+                    "log_to_file callback failed"
+                )
+
+        return callback
+
+    @staticmethod
+    def _print_to_console(config: dict | None = None) -> Callable[..., None]:
+        config = config or {}
+
+        def callback(*args: Any, **kwargs: Any) -> None:
+            try:
+                print(f"[Callback] {args} {kwargs}")
+            except Exception:
+                CallbackRouter._LOG.exception(
+                    "print_to_console callback failed"
+                )
+
+        return callback
+
+    @staticmethod
+    def _send_webhook(config: dict | None = None) -> Callable[..., None]:
+        config = config or {}
+        url = config.get("url", "")
+
+        def callback(*args: Any, **kwargs: Any) -> None:
+            try:
+                CallbackRouter._LOG.info(
+                    "send_webhook stub: would POST to %s with %s",
+                    url,
+                    kwargs,
+                )
+            except Exception:
+                CallbackRouter._LOG.exception(
+                    "send_webhook callback failed"
+                )
+
+        return callback
+
+    #: Template ID → factory callable (returns error-safe callable).
+    _TEMPLATES: dict[str, Callable[..., Callable[..., None]]] = {
+        "log_to_file": _log_to_file,
+        "print_to_console": _print_to_console,
+        "send_webhook": _send_webhook,
+    }
+
+    # ------------------------------------------------------------------ #
+    #  Public API
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def expand_callbacks(
+        cls,
+        callbacks: dict[str, Any],
+    ) -> dict[str, list[Callable[..., Any]]]:
+        """Expand template IDs to Python callables for CrewAI.
+
+        Parameters
+        ----------
+        callbacks : dict
+            Mapping of callback type names (e.g. ``"before_kickoff"``)
+            to template IDs or config dicts.  Each value may be a single
+            string / dict or a list of either.
+
+        Returns
+        -------
+        dict[str, list[Callable]]
+            Dictionary with the same keys, where each value is a list of
+            error-safe callables ready for CrewAI.
+        """
+        result: dict[str, list[Callable[..., Any]]] = {}
+
+        for callback_type, callback_specs in callbacks.items():
+            # Normalise to list
+            if not isinstance(callback_specs, list):
+                specs: list[Any] = [callback_specs]
+            else:
+                specs = callback_specs
+
+            callables: list[Callable[..., Any]] = []
+            for spec in specs:
+                # Resolve template ID and optional config
+                if isinstance(spec, str):
+                    template_id: str = spec
+                    config: dict[str, Any] = {}
+                elif isinstance(spec, dict):
+                    template_id = spec.get("template", "")
+                    config = spec.get("config", {})
+                else:
+                    cls._LOG.warning(
+                        "Skipping unsupported callback spec type: %s", type(spec)
+                    )
+                    continue
+
+                # Validate template_id is a string (unhashable types like lists would crash .get())
+                if not isinstance(template_id, str):
+                    cls._LOG.warning(
+                        "Skipping callback with non-string template_id: %s (type: %s)",
+                        template_id, type(template_id).__name__
+                    )
+                    continue
+
+                factory = cls._TEMPLATES.get(template_id)
+                if factory is not None:
+                    try:
+                        callables.append(factory(config))
+                    except Exception:
+                        cls._LOG.exception(
+                            "Failed to create callback '%s'", template_id
+                        )
+                else:
+                    cls._LOG.warning(
+                        "Unknown callback template: %s", template_id
+                    )
+
+            if callables:
+                result[callback_type] = callables
+
+        return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  Adapter  —  Pydantic models ↔ CrewAI instances
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -360,6 +544,8 @@ class Adapter:
     When CrewAI evolves, only this file (and potentially the Pydantic models)
     need updating.
     """
+
+    _LOG = logging.getLogger(__name__)
 
     @staticmethod
     def _build_llm(llm_model: models.LLMModel | None) -> Any | None:
@@ -608,6 +794,27 @@ class Adapter:
 
         if crew_model.model_extra:
             crew_kwargs.update(crew_model.model_extra)
+
+        # -- Callback expansion ----------------------------------------------
+        if crew_model.callbacks:
+            expanded = CallbackRouter.expand_callbacks(crew_model.callbacks)
+            for cb_type, cb_list in expanded.items():
+                # CrewAI natively supports these as lists
+                if cb_type in ("before_kickoff", "after_kickoff"):
+                    crew_kwargs[f"{cb_type}_callbacks"] = cb_list
+                # CrewAI expects a single callable for these
+                elif cb_type in ("step_callback", "task_callback"):
+                    if cb_list:
+                        if len(cb_list) > 1:
+                            cls._LOG.warning(
+                                "CrewAI expects a single callable for '%s'; "
+                                "using first of %d callbacks",
+                                cb_type, len(cb_list)
+                            )
+                        crew_kwargs[cb_type] = cb_list[0]
+                # Pass through for future CrewAI callback types
+                else:
+                    crew_kwargs[f"{cb_type}_callbacks"] = cb_list
 
         return _CrewAICrew(**crew_kwargs)
 

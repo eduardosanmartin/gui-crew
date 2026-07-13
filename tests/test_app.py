@@ -291,7 +291,7 @@ class TestImports:
     def test_app_has_page_handlers(self) -> None:
         """All route handler functions must be importable."""
         import app as app_module
-        for name in ("index", "builder", "canvas", "observability", "operations"):
+        for name in ("index", "builder", "canvas_page", "observability", "operations"):
             assert hasattr(app_module, name), f"Missing handler: {name}"
             fn = getattr(app_module, name)
             assert callable(fn), f"{name} is not callable"
