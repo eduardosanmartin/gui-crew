@@ -882,17 +882,18 @@ class TestCrewEngineStop:
 
 
 class TestCrewEngineTestAgent:
-    """Engine.test_agent() runs a single agent."""
+    """Engine.test_agent() runs a single agent on a background thread."""
 
     def test_agent_not_found_raises(self):
         engine = CrewEngine()
         crew = _make_crew(agents=[_make_agent(role="R", goal="G")])
         with pytest.raises(ValueError, match="No agent with role"):
-            engine.test_agent(crew, "NonExistent", "prompt")
+            engine.test_agent(crew, "NonExistent", "prompt", on_event=lambda e: None)
 
-    def test_test_agent_builds_and_runs(self):
+    def test_test_agent_returns_execution_handle_and_emits_events(self):
         engine = CrewEngine()
         crew = _make_crew(agents=[_make_agent(role="R", goal="G")])
+        events: list[dict] = []
 
         with patch(_MOD_CREWAI_AGENT) as MockAgent, \
              patch(_MOD_CREWAI_LLM) as MockLLM:
@@ -905,12 +906,23 @@ class TestCrewEngineTestAgent:
             MockAgent.return_value = mock_agent
             MockLLM.return_value = MagicMock()
 
-            result = engine.test_agent(crew, "R", "Hello")
-            assert result == "Test output"
+            handle = engine.test_agent(crew, "R", "Hello", on_event=events.append)
 
-    def test_test_agent_error_raises(self):
+            assert isinstance(handle, ExecutionHandle)
+            assert isinstance(handle.thread, threading.Thread)
+            assert handle.flag == {"stop": False}
+            assert handle.crew_id.startswith("pg-")
+
+            handle.thread.join(timeout=5)
+
+            event_types = [e["type"] for e in events]
+            assert "agent.started" in event_types
+            assert "agent.completed" in event_types
+
+    def test_test_agent_error_emits_event(self):
         engine = CrewEngine()
         crew = _make_crew(agents=[_make_agent(role="R", goal="G")])
+        events: list[dict] = []
 
         with patch(_MOD_CREWAI_AGENT) as MockAgent, \
              patch(_MOD_CREWAI_LLM) as MockLLM:
@@ -923,8 +935,12 @@ class TestCrewEngineTestAgent:
             MockAgent.return_value = mock_agent
             MockLLM.return_value = MagicMock()
 
-            with pytest.raises(RuntimeError, match="Agent test failed"):
-                engine.test_agent(crew, "R", "Hello")
+            handle = engine.test_agent(crew, "R", "Hello", on_event=events.append)
+            handle.thread.join(timeout=5)
+
+            errors = [e for e in events if e["type"] == "agent.error"]
+            assert len(errors) >= 1
+            assert "Agent failure" in errors[0]["error"]
 
 
 class TestCrewEngineTestTask:

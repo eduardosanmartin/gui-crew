@@ -962,6 +962,27 @@ _CREWAI_EVENT_MAP: dict[str, dict[str, Any]] = {
             "traceback": getattr(ev, "traceback", None),
         },
     },
+    "LiteAgentExecutionStartedEvent": {
+        "type": "agent.started",
+        "extract": lambda ev: {
+            "agent_role": getattr(ev, "agent_info", {}).get("role", ""),
+            "prompt": str(getattr(ev, "messages", ""))[:200],
+        },
+    },
+    "LiteAgentExecutionCompletedEvent": {
+        "type": "agent.completed",
+        "extract": lambda ev: {
+            "agent_role": getattr(ev, "agent_info", {}).get("role", ""),
+            "output": getattr(ev, "output", ""),
+        },
+    },
+    "LiteAgentExecutionErrorEvent": {
+        "type": "agent.error",
+        "extract": lambda ev: {
+            "agent_role": getattr(ev, "agent_info", {}).get("role", ""),
+            "error": getattr(ev, "error", ""),
+        },
+    },
 }
 
 
@@ -1172,9 +1193,15 @@ class CrewEngine:
         crew_model: models.CrewModel,
         agent_role: str,
         prompt: str,
-        on_event: EventCallback | None = None,
-    ) -> str:
-        """Run a single agent with a custom prompt (playground support).
+        *,
+        on_event: EventCallback,
+    ) -> ExecutionHandle:
+        """Run a single agent on a background thread (playground support).
+
+        Starts a daemon thread that builds the agent, registers a
+        :class:`BridgeListener` on the CrewAI event bus, and runs
+        ``kickoff_async``. Events (``agent.started``, ``agent.completed``,
+        ``agent.error``, ``agent.stopped``) are emitted via ``on_event``.
 
         Parameters
         ----------
@@ -1184,13 +1211,13 @@ class CrewEngine:
             Role string of the agent to test.
         prompt : str
             Prompt to send to the agent.
-        on_event : EventCallback | None
-            Optional event callback for streaming tokens.
+        on_event : EventCallback
+            Required callback for streaming tokens and lifecycle events.
 
         Returns
         -------
-        str
-            Agent output text.
+        ExecutionHandle
+            Handle to query / cancel the running execution.
         """
         agent_model = None
         for a in crew_model.agents:
@@ -1203,7 +1230,62 @@ class CrewEngine:
                 f"'{crew_model.name}'"
             )
 
-        # Build minimal agent with CrewAI for a single prompt test
+        crew_id = f"pg-{uuid.uuid4().hex[:12]}"
+        flag: StopFlag = {"stop": False}
+        listener = BridgeListener(crew_id=crew_id, on_event=on_event)
+
+        def _worker() -> None:
+            try:
+                listener.register()
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(
+                        self._test_agent_coro(
+                            agent_model, prompt, flag, on_event, crew_id
+                        )
+                    )
+                finally:
+                    loop.close()
+            except Exception as exc:
+                on_event({
+                    "type": "agent.error",
+                    "crew_id": crew_id,
+                    "agent_role": agent_role,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                    "ts": time.time(),
+                })
+            finally:
+                listener.unregister()
+
+        thread = threading.Thread(
+            target=_worker, daemon=True, name=f"test-agent-{crew_id[:8]}"
+        )
+        thread.start()
+
+        return ExecutionHandle(
+            thread=thread,
+            flag=flag,
+            listener=listener,
+            crew_id=crew_id,
+        )
+
+    async def _test_agent_coro(
+        self,
+        agent_model: models.AgentModel,
+        prompt: str,
+        flag: StopFlag,
+        on_event: EventCallback,
+        crew_id: str,
+    ) -> None:
+        """Async coroutine that builds and runs a single agent.
+
+        Emits synthetic lifecycle events (``agent.started``,
+        ``agent.completed``, ``agent.error``, ``agent.stopped``) so
+        callers get guaranteed event coverage even if the CrewAI event
+        bus is silent.
+        """
         agent_kwargs: dict[str, Any] = {
             "role": agent_model.role,
             "goal": agent_model.goal,
@@ -1224,18 +1306,54 @@ class CrewEngine:
 
         agent = _CrewAIAgent(**agent_kwargs)
 
+        # Emit synthetic agent.started
+        on_event({
+            "type": "agent.started",
+            "crew_id": crew_id,
+            "agent_role": agent_model.role,
+            "prompt": prompt[:200],
+            "ts": time.time(),
+        })
+
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result = loop.run_until_complete(
-                    agent.kickoff_async(text=prompt)
-                )
-                return str(result) if result else ""
-            finally:
-                loop.close()
+            # Use ``messages=prompt`` (modern CrewAI API)
+            result = await agent.kickoff_async(messages=prompt)
+            output = str(result) if result else ""
+
+            # Extract token usage (if available)
+            token_usage = getattr(result, "token_usage", {}) or {}
+            input_toks = token_usage.get("input_tokens", 0)
+            output_toks = token_usage.get("output_tokens", 0)
+
+            on_event({
+                "type": "agent.completed",
+                "crew_id": crew_id,
+                "agent_role": agent_model.role,
+                "output": output,
+                "token_usage": {
+                    "input_tokens": input_toks,
+                    "output_tokens": output_toks,
+                    "total_tokens": input_toks + output_toks,
+                },
+                "ts": time.time(),
+            })
+        except CancelledError:
+            on_event({
+                "type": "agent.stopped",
+                "crew_id": crew_id,
+                "agent_role": agent_model.role,
+                "reason": "User cancelled",
+                "ts": time.time(),
+            })
         except Exception as exc:
-            raise RuntimeError(f"Agent test failed: {exc}") from exc
+            on_event({
+                "type": "agent.error",
+                "crew_id": crew_id,
+                "agent_role": agent_model.role,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+                "ts": time.time(),
+            })
 
     def test_task(
         self,
