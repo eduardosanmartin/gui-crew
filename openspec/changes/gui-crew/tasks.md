@@ -81,29 +81,29 @@ Chain strategy: **feature-branch-chain**
 
 ### File: `styles.py` (Independent)
 
-- [ ] 1.8 Define theme tokens, CSS classes, and Quasar prop constants (~80 LOC, Risk: Low)
+- [x] 1.8 Define theme tokens, CSS classes, and Quasar prop constants (~80 LOC, Risk: Low)
   - **Description**: Color palette, spacing, typography, card/ form styles. Quasar-specific prop mappings.
   - **AC**: GIVEN `styles.py` imported, WHEN accessing `styles.THEME.primary`, THEN a valid color hex is returned.
   - **Deps**: None
 
-- [ ] 1.9 Define thinking-vs-answer token styles and dark-mode tokens (~40 LOC, Risk: Low)
+- [x] 1.9 Define thinking-vs-answer token styles and dark-mode tokens (~40 LOC, Risk: Low)
   - **Description**: Distinct CSS classes for reasoning tokens (italic, dimmed) vs final answer tokens.
   - **AC**: GIVEN token type="thinking", WHEN rendering with `styles.TOKEN_THINKING`, THEN CSS applies italic + dimmed color.
   - **Deps**: 1.8
 
 ### File: `app.py` (Shell — depends on styles)
 
-- [ ] 1.10 Implement NiceGUI entry point with `storage_secret` and session init (~40 LOC, Risk: Low)
+- [x] 1.10 Implement NiceGUI entry point with `storage_secret` and session init (~40 LOC, Risk: Low)
   - **Description**: `ui.run()` with `storage_secret`, title, favicon. Init `app.storage.user` defaults.
   - **AC**: GIVEN the app starts, WHEN loading `/`, THEN `app.storage.user` contains default `crew_model`, `mode`, `ui_prefs`.
   - **Deps**: 1.8
 
-- [ ] 1.11 Implement routing: `/builder`, `/obs`, `/ops`, `/` redirect (~50 LOC, Risk: Low)
+- [x] 1.11 Implement routing: `/builder`, `/obs`, `/ops`, `/` redirect (~50 LOC, Risk: Low)
   - **Description**: `@ui.page` decorators for each view. Header nav drawer with active state.
   - **AC**: GIVEN the app is running, WHEN navigating to `/obs`, THEN the Observability view renders and nav highlights "Observability".
   - **Deps**: 1.10
 
-- [ ] 1.12 Implement header navigation and theme binding (~30 LOC, Risk: Low)
+- [x] 1.12 Implement header navigation and theme binding (~30 LOC, Risk: Low)
   - **Description**: Top bar with crew name, run/stop buttons (conditional), theme toggle.
   - **AC**: GIVEN a crew is running, WHEN viewing any page, THEN header shows "Stop" button. WHEN clicked, THEN stop signal fires.
   - **Deps**: 1.11
@@ -152,42 +152,42 @@ Chain strategy: **feature-branch-chain**
 
 ### File: `builder.py` (Fase 1 — no canvas sync yet)
 
-- [ ] 1.21 Implement crew configuration form (advanced mode) (~100 LOC, Risk: Med)
+- [x] 1.21 Implement crew configuration form (advanced mode) (~100 LOC, Risk: Med)
   - **Description**: All crew fields: name, process, memory, planning, manager_llm, knowledge_sources, etc. Conditional display of hierarchical fields.
   - **AC**: GIVEN advanced mode active, WHEN filling name="Research Crew" and process="sequential", THEN form validates and saves to `app.storage.user["crew_model"]`.
   - **Deps**: 1.4, 1.8
 
-- [ ] 1.22 Implement agent configuration form with tool selection (~120 LOC, Risk: Med)
+- [x] 1.22 Implement agent configuration form with tool selection (~120 LOC, Risk: Med)
   - **Description**: Role, goal, backstory, llm, function_calling_llm, tools, memory, allow_delegation, etc. Tool multi-select from catalog.
   - **AC**: GIVEN the builder is open, WHEN adding agent "Researcher" and selecting 2 tools, THEN agent appears in crew agent list with correct tool refs.
   - **Deps**: 1.21
 
-- [ ] 1.23 Implement task configuration form with context dependencies (~100 LOC, Risk: Med)
+- [x] 1.23 Implement task configuration form with context dependencies (~100 LOC, Risk: Med)
   - **Description**: Description, expected_output, agent assignment, context (task dependency multi-select), output_file, guardrails, etc.
   - **AC**: GIVEN tasks "Research" and "Write Report", WHEN editing "Write Report" and adding "Research" to context, THEN task model updates and DAG edge is implied.
   - **Deps**: 1.22
 
-- [ ] 1.24 Implement LLM / memory / knowledge sub-forms (~80 LOC, Risk: Low)
+- [x] 1.24 Implement LLM / memory / knowledge sub-forms (~80 LOC, Risk: Low)
   - **Description**: Reusable form components for LLM config, memory settings, knowledge sources.
   - **AC**: GIVEN an agent form, WHEN opening the LLM sub-form and setting model="claude-3-5-sonnet", THEN the LLM config saves to the agent model.
   - **Deps**: 1.21
 
-- [ ] 1.25 Implement guided wizard mode (5 steps) (~120 LOC, Risk: Med)
+- [x] 1.25 Implement guided wizard mode (5 steps) (~120 LOC, Risk: Med)
   - **Description**: Step-by-step: (1) template or blank, (2) goal, (3) add agents, (4) define tasks, (5) review & save. Progress indicator. Sensible defaults. Advanced params hidden.
   - **AC**: GIVEN a first-time user, WHEN selecting "Guided Wizard", THEN 5-step flow appears with progress bar, and advanced fields are hidden.
   - **Deps**: 1.24
 
-- [ ] 1.26 Implement tool catalog display and custom tool form (~80 LOC, Risk: Med)
+- [x] 1.26 Implement tool catalog display and custom tool form (~80 LOC, Risk: Med)
   - **Description**: Built-in crewai-tools catalog with search/filter. Custom tool form: name, description, Pydantic args_schema editor.
   - **AC**: GIVEN the tool catalog is open, WHEN searching "serper", THEN `SerperDevTool` appears. WHEN adding a custom tool with args_schema, THEN it serializes correctly.
   - **Deps**: 1.22
 
-- [ ] 1.27 Implement variable interpolation preview (~40 LOC, Risk: Low)
+- [x] 1.27 Implement variable interpolation preview (~40 LOC, Risk: Low)
   - **Description**: Live preview of `{variable}` interpolation in goal/backstory fields using default values from `crew.inputs`.
   - **AC**: GIVEN crew has input `{topic}="AI"`, WHEN typing goal="Research {topic}", THEN a live preview shows "Research AI".
   - **Deps**: 1.23
 
-- [ ] 1.28 Implement save/load crew to/from `app.storage.user` (~40 LOC, Risk: Low)
+- [x] 1.28 Implement save/load crew to/from `app.storage.user` (~40 LOC, Risk: Low)
   - **Description**: Explicit Save button writes `CrewModel` to `app.storage.user["crew_model"]`. Load on page init.
   - **AC**: GIVEN a configured crew, WHEN clicking "Save", THEN `app.storage.user["crew_model"]` contains the full crew dump. WHEN reloading the page, THEN form populates from storage.
   - **Deps**: 1.21–1.27
@@ -294,47 +294,47 @@ Chain strategy: **feature-branch-chain**
 
 ### File: `operations.py` (Fase 2 — Templates, History, Import/Export, Single-task)
 
-- [ ] 2.9 Implement built-in template gallery (5 templates) (~80 LOC, Risk: Low)
+- [x] 2.9 Implement built-in template gallery (5 templates) (~80 LOC, Risk: Low)
   - **Description**: Research Crew, Code Review Crew, Content Writer Crew, Data Analysis Crew, Customer Support Crew. Load into builder.
   - **AC**: GIVEN the template gallery, WHEN selecting "Research Crew" and clicking "Use Template", THEN a new crew appears in Builder with pre-configured agents and tasks.
   - **Deps**: 1.25, 1.28
 
-- [ ] 2.10 Implement custom template save functionality (~40 LOC, Risk: Low)
+- [x] 2.10 Implement custom template save functionality (~40 LOC, Risk: Low)
   - **Description**: "Save as Template" button. Stores current crew to `app.storage.user["templates_custom"]`.
   - **AC**: GIVEN a configured crew, WHEN clicking "Save as Template" and naming it "My Template", THEN it appears in custom templates gallery.
   - **Deps**: 2.9
 
-- [ ] 2.11 Implement execution history persistence to local file (~60 LOC, Risk: Med)
+- [x] 2.11 Implement execution history persistence to local file (~60 LOC, Risk: Med)
   - **Description**: Save `RunRecord` to `history/<crew_name>/<timestamp>.json`. Load on app start.
   - **AC**: GIVEN a completed run, WHEN checking `history/` directory, THEN a JSON file exists with run metadata. WHEN reloading app, THEN history list populates.
   - **Deps**: 1.6, 1.16
 
-- [ ] 2.12 Implement history list view with filtering (~50 LOC, Risk: Low)
+- [x] 2.12 Implement history list view with filtering (~50 LOC, Risk: Low)
   - **Description**: Table with date, crew name, status, duration, cost. Filters: date range, crew name, status.
   - **AC**: GIVEN 50 history entries, WHEN filtering by crew="Research Crew" and status="failed", THEN only matching 3 entries appear.
   - **Deps**: 2.11
 
-- [ ] 2.13 Implement side-by-side execution comparison (~60 LOC, Risk: Low)
+- [x] 2.13 Implement side-by-side execution comparison (~60 LOC, Risk: Low)
   - **Description**: Select 2 runs, click "Compare". Side-by-side view: inputs, outputs, duration, tokens, cost. Diff highlighting.
   - **AC**: GIVEN two runs with different inputs, WHEN selecting both and clicking "Compare", THEN side-by-side view shows both runs with differences highlighted.
   - **Deps**: 2.12
 
-- [ ] 2.14 Implement export to CrewAI-native JSONC/YAML with download (~50 LOC, Risk: Med)
+- [x] 2.14 Implement export to CrewAI-native JSONC/YAML with download (~50 LOC, Risk: Med)
   - **Description**: Export button uses `CrewModel.to_crewai_jsonc/yaml()`. Browser download prompt.
   - **AC**: GIVEN a configured crew, WHEN clicking "Export" → "JSONC", THEN a file downloads matching CrewAI CLI schema.
   - **Deps**: 1.5
 
-- [ ] 2.15 Implement import from JSONC/YAML with validation (~70 LOC, Risk: Med)
+- [x] 2.15 Implement import from JSONC/YAML with validation (~70 LOC, Risk: Med)
   - **Description**: File upload, parse, validate with line-reference errors. Populate builder forms and canvas.
   - **AC**: GIVEN a valid `crew.jsonc` file, WHEN importing, THEN builder and canvas populate correctly. WHEN importing invalid YAML, THEN error panel shows parse error with line number.
   - **Deps**: 1.5, 2.1
 
-- [ ] 2.16 Implement import round-trip verification (~30 LOC, Risk: Low)
+- [x] 2.16 Implement import round-trip verification (~30 LOC, Risk: Low)
   - **Description**: Test: export crew → import → assert functionally identical.
   - **AC**: GIVEN a crew, WHEN exporting then re-importing, THEN the imported crew matches original (all params preserved).
   - **Deps**: 2.14, 2.15
 
-- [ ] 2.17 Implement single-task test UI and execution (~60 LOC, Risk: Med)
+- [x] 2.17 Implement single-task test UI and execution (~60 LOC, Risk: Med)
   - **Description**: Right-click task node in canvas → "Test Task". Mock context input textarea. Run button. Output panel.
   - **AC**: GIVEN task "Summarize" depending on "Research", WHEN right-clicking and selecting "Test Task" with mock context, THEN only "Summarize" executes with mock input and result appears in test panel.
   - **Deps**: 1.37, 2.1
