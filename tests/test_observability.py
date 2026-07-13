@@ -56,6 +56,10 @@ def _reset_observability_state() -> None:
     observability._resources.clear()
     observability._errors.clear()
     observability._event_buffer.clear()
+    observability._token_stats.clear()
+    observability._token_displays.clear()
+    observability._tps_labels.clear()
+    observability._token_count_labels.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -545,8 +549,9 @@ class TestErrorState:
         assert len(observability._errors["c1"]) == 1
         entry = observability._errors["c1"][0]
         assert entry["guardrail_name"] == "CheckFormat"
-        assert entry["error"] == "Bad format"
+        assert entry["message"] == "Bad format"
         assert entry["attempt"] == 1
+        assert entry["type"] == "guardrail_retry"
 
     def test_multiple_error_entries_accumulate(self):
         """Multiple guardrail failures accumulate in order."""
@@ -559,6 +564,55 @@ class TestErrorState:
         assert len(observability._errors["c1"]) == 3
         assert observability._errors["c1"][0]["attempt"] == 1
         assert observability._errors["c1"][2]["attempt"] == 3
+
+    def test_task_failed_adds_error_entry(self):
+        """task.failed events add error-type entries."""
+        observability._dispatch(
+            _evt("task.failed", crew_id="c1", task_name="Research",
+                 error="Task crashed", traceback="Traceback...")
+        )
+        assert "c1" in observability._errors
+        assert len(observability._errors["c1"]) == 1
+        entry = observability._errors["c1"][0]
+        assert entry["type"] == "error"
+        assert entry["task_name"] == "Research"
+        assert entry["message"] == "Task crashed"
+        assert entry["traceback"] == "Traceback..."
+
+    def test_crew_error_adds_error_entry(self):
+        """crew.error events add error-type entries."""
+        observability._dispatch(
+            _evt("crew.error", crew_id="c1", error="Fatal", traceback="TB")
+        )
+        assert len(observability._errors["c1"]) == 1
+        entry = observability._errors["c1"][0]
+        assert entry["type"] == "error"
+        assert entry["message"] == "Fatal"
+
+    def test_guardrail_retry_counters_increment(self):
+        """Guardrail retry counter increments across events."""
+        for attempt in range(1, 4):
+            observability._dispatch(
+                _evt("guardrail.failed", crew_id="c1",
+                     guardrail_name="Check", task_name="R1",
+                     error=f"Fail #{attempt}", attempt=attempt,
+                     max_retries=3)
+            )
+        entries = observability._errors["c1"]
+        assert entries[0]["attempt"] == 1
+        assert entries[0]["max_retries"] == 3
+        assert entries[2]["attempt"] == 3
+
+    def test_internal_retry_suppressed(self):
+        """Non-guardrail error events appear as 'error' type, not 'guardrail_retry'."""
+        observability._dispatch(
+            _evt("task.failed", crew_id="c1", task_name="Task1",
+                 error="Tool internal retry")
+        )
+        entry = observability._errors["c1"][0]
+        assert entry["type"] == "error"
+        # Not guardrail_retry — no attempt counter
+        assert "attempt" not in entry
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -960,3 +1014,219 @@ class TestMesoModuleAttributes:
     def test_update_activity_log_is_module_attribute(self):
         """_update_activity_log is a module-level function."""
         assert hasattr(observability, "_update_activity_log")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Micro Panel — token streaming state + style selection
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestMicroTokenStreaming:
+    """Token events store correct data and styles in _token_elements."""
+
+    def test_token_stream_stores_text_and_style_flag(self):
+        """token.stream with is_thinking=True stores the flag correctly."""
+        observability._dispatch(
+            _evt("token.stream", crew_id="c1", text="Let me think...",
+                 is_thinking=True, agent_role="Analyst")
+        )
+        tokens = observability._token_elements.get("c1", [])
+        assert len(tokens) == 1
+        assert tokens[0]["text"] == "Let me think..."
+        assert tokens[0]["is_thinking"] is True
+        assert tokens[0]["agent_role"] == "Analyst"
+
+    def test_answer_tokens_have_is_thinking_false(self):
+        """Answer tokens set is_thinking=False."""
+        observability._dispatch(
+            _evt("token.stream", crew_id="c1", text="The answer is 42",
+                 is_thinking=False)
+        )
+        tokens = observability._token_elements.get("c1", [])
+        assert tokens[0]["is_thinking"] is False
+
+    def test_multiple_tokens_accumulate_in_order(self):
+        """Tokens are appended in order of arrival."""
+        for i, (text, thinking) in enumerate([
+            ("Thinking...", True),
+            ("Answer part 1", False),
+            ("More thinking...", True),
+            ("Answer part 2", False),
+        ]):
+            observability._dispatch(
+                _evt("token.stream", crew_id="c1", text=text,
+                     is_thinking=thinking, ts=1000.0 + i)
+            )
+        tokens = observability._token_elements["c1"]
+        assert len(tokens) == 4
+        assert tokens[0]["is_thinking"] is True
+        assert tokens[1]["is_thinking"] is False
+        assert tokens[2]["is_thinking"] is True
+        assert tokens[3]["is_thinking"] is False
+
+    def test_tokens_isolated_by_crew_id(self):
+        """Tokens for different crews are in separate lists."""
+        observability._dispatch(
+            _evt("token.stream", crew_id="crew-A", text="A")
+        )
+        observability._dispatch(
+            _evt("token.stream", crew_id="crew-B", text="B")
+        )
+        assert len(observability._token_elements["crew-A"]) == 1
+        assert len(observability._token_elements["crew-B"]) == 1
+
+
+class TestMicroTokenStats:
+    """Tokens/sec and cumulative count are tracked correctly."""
+
+    def test_token_stats_count_increments(self):
+        """Each token increments the cumulative count."""
+        for i in range(5):
+            observability._dispatch(
+                _evt("token.stream", crew_id="c1", text=f"tok{i}",
+                     ts=1000.0 + i * 0.1)
+            )
+        stats = observability._token_stats.get("c1", {})
+        assert stats.get("token_count") == 5
+
+    def test_token_stats_timestamps_window(self):
+        """Token timestamps are stored in a sliding window."""
+        # Feed 150 tokens — window should hold only last 100
+        for i in range(150):
+            observability._dispatch(
+                _evt("token.stream", crew_id="c1", text=f"tok{i}",
+                     ts=1000.0 + i * 0.05)
+            )
+        stats = observability._token_stats.get("c1", {})
+        timestamps = stats.get("token_timestamps", [])
+        assert len(timestamps) == 100
+
+    def test_tokens_per_sec_computed(self):
+        """Tokens/sec is computed from the sliding window."""
+        # Feed tokens at 0.1s intervals → ~10 tokens/sec
+        for i in range(20):
+            observability._dispatch(
+                _evt("token.stream", crew_id="c1", text=f"tok{i}",
+                     ts=1000.0 + i * 0.1)
+            )
+        stats = observability._token_stats.get("c1", {})
+        tps = stats.get("tokens_per_sec", 0)
+        # 19 inter-token gaps / (20*0.1 - 0) = 19 / 2.0 ≈ 9.5
+        assert 8.0 < tps < 12.0
+
+    def test_token_stats_keyed_by_crew(self):
+        """Token stats are separate per crew_id."""
+        observability._dispatch(
+            _evt("token.stream", crew_id="c1", text="a", ts=1000.0)
+        )
+        observability._dispatch(
+            _evt("token.stream", crew_id="c2", text="b", ts=1000.0)
+        )
+        observability._dispatch(
+            _evt("token.stream", crew_id="c2", text="c", ts=1000.1)
+        )
+        assert observability._token_stats["c1"]["token_count"] == 1
+        assert observability._token_stats["c2"]["token_count"] == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Resource Panel — per-task consumption table
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestResourceAccumulation:
+    """resource.update events accumulate per-task rows in _resources."""
+
+    def test_resource_update_stores_all_fields(self):
+        """resource.update stores tokens_in, tokens_out, cost, duration, iters."""
+        observability._dispatch(
+            _evt("resource.update", crew_id="c1", task="Research",
+                 tokens_in=500, tokens_out=1200, cost=0.015,
+                 duration=3.5, iterations=2, agent_role="Researcher")
+        )
+        res = observability._resources.get("c1", {}).get("Research", {})
+        assert res["tokens_in"] == 500
+        assert res["tokens_out"] == 1200
+        assert res["cost"] == 0.015
+        assert res["duration"] == 3.5
+        assert res["iterations"] == 2
+        assert res["agent"] == "Researcher"
+
+    def test_multiple_tasks_per_crew(self):
+        """Multiple tasks accumulate under a single crew_id."""
+        observability._dispatch(
+            _evt("resource.update", crew_id="c1", task="Research",
+                 tokens_in=100, cost=0.001, duration=1.0, iterations=1)
+        )
+        observability._dispatch(
+            _evt("resource.update", crew_id="c1", task="Write",
+                 tokens_in=200, cost=0.002, duration=2.0, iterations=1)
+        )
+        resources = observability._resources.get("c1", {})
+        assert len(resources) == 2
+        assert "Research" in resources
+        assert "Write" in resources
+
+    def test_resource_cost_placeholder_none(self):
+        """Cost defaults to None (renders as '—') until explicitly set."""
+        observability._dispatch(
+            _evt("resource.update", crew_id="c1", task="Research",
+                 tokens_in=100, tokens_out=200, duration=1.0, iterations=1)
+            # No cost field
+        )
+        res = observability._resources["c1"]["Research"]
+        assert res["cost"] is None
+
+    def test_resource_cost_exact_when_provided(self):
+        """When resource.update includes cost, it is stored exactly."""
+        observability._dispatch(
+            _evt("resource.update", crew_id="c1", task="Research",
+                 tokens_in=500, cost=0.015, duration=1.0, iterations=1)
+        )
+        assert observability._resources["c1"]["Research"]["cost"] == 0.015
+
+    def test_resource_isolated_by_crew(self):
+        """Resource data is separated by crew_id."""
+        observability._dispatch(
+            _evt("resource.update", crew_id="crew-A", task="T1",
+                 tokens_in=100, cost=0.01, duration=1.0, iterations=1)
+        )
+        observability._dispatch(
+            _evt("resource.update", crew_id="crew-B", task="T1",
+                 tokens_in=999, cost=0.99, duration=1.0, iterations=1)
+        )
+        assert observability._resources["crew-A"]["T1"]["tokens_in"] == 100
+        assert observability._resources["crew-B"]["T1"]["tokens_in"] == 999
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Phase 4 Module Attributes — render functions are importable
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestPhase4ModuleAttributes:
+    """Micro, resource, and error render functions are module-level attributes."""
+
+    def test_render_micro_is_module_attribute(self):
+        """_render_micro is importable."""
+        assert hasattr(observability, "_render_micro")
+
+    def test_render_resource_is_module_attribute(self):
+        """_render_resource is importable."""
+        assert hasattr(observability, "_render_resource")
+
+    def test_render_error_is_module_attribute(self):
+        """_render_error is importable."""
+        assert hasattr(observability, "_render_error")
+
+    def test_token_stats_dict_exists(self):
+        """_token_stats is initialised."""
+        assert isinstance(observability._token_stats, dict)
+
+    def test_token_displays_dict_exists(self):
+        """_token_displays is initialised."""
+        assert isinstance(observability._token_displays, dict)
+
+    def test_token_count_labels_dict_exists(self):
+        """_token_count_labels is initialised."""
+        assert isinstance(observability._token_count_labels, dict)
