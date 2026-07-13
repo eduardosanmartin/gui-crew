@@ -929,6 +929,39 @@ _CREWAI_EVENT_MAP: dict[str, dict[str, Any]] = {
             "chunks": getattr(ev, "chunks", 0),
         },
     },
+    "LLMGuardrailStartedEvent": {
+        "type": "guardrail.started",
+        "extract": lambda ev: {
+            "guardrail_name": getattr(ev, "guardrail_name", ""),
+            "task_name": getattr(ev, "task_name", ""),
+            "attempt": getattr(ev, "attempt", 1),
+        },
+    },
+    "LLMGuardrailCompletedEvent": {
+        "type": "guardrail.completed",
+        "extract": lambda ev: {
+            "guardrail_name": getattr(ev, "guardrail_name", ""),
+            "task_name": getattr(ev, "task_name", ""),
+            "output": getattr(ev, "output", None),
+        },
+    },
+    "LLMGuardrailFailedEvent": {
+        "type": "guardrail.failed",
+        "extract": lambda ev: {
+            "guardrail_name": getattr(ev, "guardrail_name", ""),
+            "task_name": getattr(ev, "task_name", ""),
+            "error": getattr(ev, "error", ""),
+            "attempt": getattr(ev, "attempt", 1),
+        },
+    },
+    "TaskFailedEvent": {
+        "type": "task.failed",
+        "extract": lambda ev: {
+            "task_name": getattr(ev, "task_name", ""),
+            "error": getattr(ev, "error", ""),
+            "traceback": getattr(ev, "traceback", None),
+        },
+    },
 }
 
 
