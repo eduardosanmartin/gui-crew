@@ -490,6 +490,96 @@ class CrewModel(BaseModel):
 
         return result
 
+    # -- CrewAI Python import/export ----------------------------------------
+
+    @classmethod
+    def from_crewai_python(cls, content: str, filename: str = "<string>") -> CrewModel:
+        """Parse a CrewAI Python source file into a CrewModel.
+
+        Delegates to ``crewai_python_parser.parse_file``.  Supports
+        classic-style files with inline ``Agent()`` / ``Task()`` /
+        ``Crew()`` constructor calls and variable references.
+
+        Args:
+            content: Python source code as a string.
+            filename: Source filename for error messages.
+
+        Returns:
+            Parsed CrewModel instance ready for the Builder.
+
+        Raises:
+            ParseError: If required definitions are missing or the
+                file uses ``@CrewBase`` (decorator) style.
+            SyntaxError: If the source has invalid Python syntax.
+        """
+        from crewai_python_parser import parse_file
+
+        return parse_file(content, filename)
+
+    @classmethod
+    def from_crewai_python_file(cls, path: str) -> CrewModel:
+        """Parse a CrewAI Python file from disk into a CrewModel.
+
+        Convenience wrapper around ``from_crewai_python`` that reads
+        the file first.
+
+        Args:
+            path: Path to a ``.py`` file on disk.
+
+        Returns:
+            Parsed CrewModel instance.
+        """
+        with open(path, encoding="utf-8") as fh:
+            content = fh.read()
+        return cls.from_crewai_python(content, filename=path)
+
+    @staticmethod
+    def scan_crewai_directory(path: str) -> list[Any]:
+        """Recursively scan *path* for CrewAI ``.py`` crew files.
+
+        Delegates to ``crewai_python_parser.scan_directory``.
+
+        Args:
+            path: Directory to scan.
+
+        Returns:
+            List of ``CrewScanResult`` named tuples.
+        """
+        from pathlib import Path
+        from crewai_python_parser import scan_directory
+
+        return scan_directory(Path(path))
+
+    def to_crewai_python(
+        self,
+        style: str = "decorator",
+        include_yaml: bool = True,
+        include_tools_stubs: bool = True,
+    ) -> bytes:
+        """Generate a runnable CrewAI Python project as ZIP bytes.
+
+        Delegates to ``crewai_code_generator.generate_zip``.
+
+        Args:
+            style: ``"decorator"`` (default, ``@CrewBase`` pattern) or
+                ``"classic"`` (inline constructors).
+            include_yaml: If ``True``, include ``config/*.yaml`` files
+                (decorator style only).
+            include_tools_stubs: If ``True``, include ``tools/custom_tool.py``
+                with TODO placeholders for any custom tools.
+
+        Returns:
+            Bytes of the generated ZIP file.
+        """
+        from crewai_code_generator import generate_zip
+
+        return generate_zip(
+            self,
+            style=style,
+            include_yaml=include_yaml,
+            include_tools_stubs=include_tools_stubs,
+        )
+
     # -- public serialization -----------------------------------------------
 
     def to_crewai_json(self, indent: int = 2) -> str:
