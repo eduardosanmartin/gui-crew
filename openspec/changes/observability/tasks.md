@@ -39,8 +39,8 @@ Chain strategy: feature-branch-chain
 
 ## Phase 3: PR 5b — Meso Layer
 
-- [ ] 3.1 Implement `_render_meso` with agent cards, tool invocation cards (name, input, result, duration, errors), and delegation cards (from/to, context, response)
-- [ ] 3.2 Add knowledge operation cards to meso layer (read/write with type)
+- [x] 3.1 Implement `_render_meso` with agent cards, tool invocation cards (name, input, result, duration, errors), and delegation cards (from/to, context, response)
+- [x] 3.2 Add knowledge operation cards to meso layer (read/write with type)
 
 ## Phase 4: PR 6 — Micro + Resource + Error
 
