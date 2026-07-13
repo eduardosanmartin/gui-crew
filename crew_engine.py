@@ -1316,8 +1316,15 @@ class CrewEngine:
         })
 
         try:
-            # Use ``messages=prompt`` (modern CrewAI API)
-            result = await agent.kickoff_async(messages=prompt)
+            # Enforce ``max_execution_time`` (flows via model_extra)
+            max_execution_time = agent_model.model_extra.get("max_execution_time")
+            if max_execution_time is not None:
+                result = await asyncio.wait_for(
+                    agent.kickoff_async(messages=prompt),
+                    timeout=max_execution_time,
+                )
+            else:
+                result = await agent.kickoff_async(messages=prompt)
             output = str(result) if result else ""
 
             # Extract token usage (if available)
@@ -1335,6 +1342,14 @@ class CrewEngine:
                     "output_tokens": output_toks,
                     "total_tokens": input_toks + output_toks,
                 },
+                "ts": time.time(),
+            })
+        except asyncio.TimeoutError:
+            on_event({
+                "type": "agent.timeout",
+                "crew_id": crew_id,
+                "agent_role": agent_model.role,
+                "timeout_seconds": max_execution_time,
                 "ts": time.time(),
             })
         except CancelledError:

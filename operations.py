@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -1073,6 +1074,86 @@ def _render_single_task_test() -> None:
     ).props(THEME.component.BTN_PRIMARY["props"])
 
     output_label
+
+
+# ============================================================================
+#  Agent Playground  (Playground PR 1 — skeleton)
+# ============================================================================
+
+# Module-level run state keyed by session/tab ID.
+# Each session stores the last N=2 runs as deque entries:
+#   {crew_id, agent_role, prompt, start_time, status}
+_playground_runs: dict[str, deque] = {}
+
+
+def _get_crew_model() -> models.CrewModel | None:
+    """Retrieve the current crew model from session storage."""
+    crew_dict = app.storage.user.get("crew_model")
+    if not crew_dict:
+        return None
+    try:
+        return models.CrewModel(**crew_dict)
+    except Exception:
+        return None
+
+
+def _run_agent(agent_role: str, prompt: str) -> None:
+    """Placeholder for PR 2 execution logic."""
+    pass
+
+
+def _stop_agent() -> None:
+    """Placeholder for PR 2 cancellation logic."""
+    pass
+
+
+def _render_playground() -> None:
+    """Agent playground accordion — standalone single-agent testing UI.
+
+    Renders an accordion with agent selection, prompt input, Run/Stop
+    buttons, and an output panel skeleton.  Execution wiring lands in PR 2.
+    """
+    crew_model = _get_crew_model()
+
+    with ui.expansion("Agent Playground", value=True).classes("w-full"):
+        # ── Empty state ───────────────────────────────────────────────
+        if not crew_model or not crew_model.agents:
+            ui.label("No agents configured").classes("text-grey")
+            return
+
+        # ── Agent dropdown ────────────────────────────────────────────
+        agent_roles = [a.role for a in crew_model.agents]
+        agent_dropdown = ui.select(
+            options=agent_roles,
+            label="Select agent",
+            value=agent_roles[0],
+        ).props("outlined").classes("w-full")
+
+        # ── Prompt textarea ───────────────────────────────────────────
+        prompt_input = ui.textarea(
+            label="Prompt",
+            placeholder="Enter your prompt...",
+        ).props("outlined").classes("w-full")
+
+        # ── Run / Stop buttons ────────────────────────────────────────
+        with ui.row().classes("gap-2"):
+            ui.button(
+                "Run",
+                icon="play_arrow",
+                on_click=lambda: _run_agent(
+                    agent_dropdown.value, prompt_input.value
+                ),
+            )
+            ui.button(
+                "Stop",
+                icon="stop",
+                on_click=_stop_agent,
+            ).props("outline")
+
+        # ── Output panel skeleton (PR 2 wires to observability) ───────
+        with ui.card().classes("w-full mt-4"):
+            ui.label("Output").classes("font-bold")
+            ui.label("Status: idle").classes("text-grey")
 
 
 # ============================================================================

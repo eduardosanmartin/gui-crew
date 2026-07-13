@@ -84,6 +84,7 @@ NAV_ITEMS: list[tuple[str, str, str]] = [
     ("Canvas", "/canvas", "account_tree"),
     ("Observability", "/observability", "visibility"),
     ("Operations", "/operations", "settings"),
+    ("Playground", "/playground", "play_circle"),
 ]
 
 
@@ -187,7 +188,18 @@ def observability() -> None:
 @ui.page("/operations")
 def operations() -> None:
     """Operations view — playground, templates, history, import/export."""
-    render_page("Operations", _render_operations_placeholder)
+    import operations as _operations
+
+    render_page("Operations", _operations.render_operations)
+
+
+@ui.page("/playground")
+def playground_page() -> None:
+    """Playground view — single-agent testing with streaming output."""
+    import operations as _operations
+
+    _render_header()
+    _operations._render_playground()
 
 
 # ═══════════════════════════════════════════════
