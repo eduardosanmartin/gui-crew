@@ -194,37 +194,37 @@ Chain strategy: **feature-branch-chain**
 
 ### File: `observability.py` (Fase 1 — all 3 layers + resource)
 
-- [ ] 1.29 Implement macro layer: pipeline visualization with task states (~100 LOC, Risk: Med)
+- [x] 1.29 Implement macro layer: pipeline visualization with task states (~100 LOC, Risk: Med)
   - **Description**: Render all tasks with states (pending→running→completed/failed). Progress bar. Active task highlight. Status bar with spinner + current tool name.
   - **AC**: GIVEN 3 sequential tasks running, WHEN task 1 completes, THEN task 1 shows "completed", task 2 shows "running", progress bar updates to 33%.
   - **Deps**: 1.14, 1.8
 
-- [ ] 1.30 Implement meso layer: agent cards, tool invocations, delegations, memory ops (~120 LOC, Risk: Med)
+- [x] 1.30 Implement meso layer: agent cards, tool invocations, delegations, memory ops (~120 LOC, Risk: Med)
   - **Description**: Current agent card. Tool invocation cards (name, params, status, duration, error). Delegation events (from→to, context, response). Memory ops (kind, query, time). Tool Activity log (`ui.log`).
   - **AC**: GIVEN agent "Researcher" invokes `SerperDevTool`, WHEN tool starts, THEN a card appears with "running" status. WHEN tool returns, THEN card updates with result and duration.
   - **Deps**: 1.29
 
-- [ ] 1.31 Implement micro layer: token streaming with thinking/answer distinction (~100 LOC, Risk: Med)
+- [x] 1.31 Implement micro layer: token streaming with thinking/answer distinction (~100 LOC, Risk: Med)
   - **Description**: Real-time token streaming text area. Thinking tokens in `styles.TOKEN_THINKING` style. Tokens-per-second metric. Virtual scrolling for >10k tokens.
   - **AC**: GIVEN streaming is enabled, WHEN an agent produces output, THEN tokens appear in real-time. WHEN `is_thinking=True`, THEN tokens render italic+dimmed.
   - **Deps**: 1.29, 1.9
 
-- [ ] 1.32 Implement resource consumption panel (~60 LOC, Risk: Low)
+- [x] 1.32 Implement resource consumption panel (~60 LOC, Risk: Low)
   - **Description**: Table with columns: Task, Agent, Duration, Tokens In, Tokens Out, Est. Cost, Iterations. Total cost prominently displayed.
   - **AC**: GIVEN 2 tasks have completed, WHEN viewing resource panel, THEN both rows appear with accurate tokens and cost.
   - **Deps**: 1.18, 1.30
 
-- [ ] 1.33 Implement error panel with traceback and retry visibility (~60 LOC, Risk: Med)
+- [x] 1.33 Implement error panel with traceback and retry visibility (~60 LOC, Risk: Med)
   - **Description**: Error cards with stack trace. Retry events show "retrying (attempt 1/3)" in timeline. Callback invocations logged.
   - **AC**: GIVEN a task fails with guardrail_max_retries=3, WHEN retry triggers, THEN timeline shows retry attempt counter. WHEN all retries fail, THEN error panel shows final error + traceback.
   - **Deps**: 1.30
 
-- [ ] 1.34 Implement WebSocket event subscription with mandatory `crew_id` filtering (~50 LOC, Risk: High)
+- [x] 1.34 Implement WebSocket event subscription with mandatory `crew_id` filtering (~50 LOC, Risk: High)
   - **Description**: Every subscriber MUST filter `event["crew_id"] == active_crew_id` before rendering. Protocol-level crew_id is mandatory.
   - **AC**: GIVEN two browser tabs run Crew A and Crew B simultaneously, WHEN events emit, THEN Tab A only receives crew_id="a" events and Tab B only receives crew_id="b" events.
   - **Deps**: 1.14, 1.29
 
-- [ ] 1.35 Implement reconnect buffer replay (~40 LOC, Risk: Med)
+- [x] 1.35 Implement reconnect buffer replay (~40 LOC, Risk: Med)
   - **Description**: Buffer last N events per `crew_id` (deque maxlen). Replay on re-subscription after WebSocket disconnect.
   - **AC**: GIVEN a disconnect during execution, WHEN reconnecting within 30s, THEN missed events replay and dashboard catches up.
   - **Deps**: 1.34
