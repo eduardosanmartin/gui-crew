@@ -16,8 +16,18 @@ import os
 from typing import Callable
 
 from nicegui import app, ui
+from nicegui.event import Event
 
+import observability
+from crew_engine import ProtocolEvent
 from styles import THEME
+
+# -- Event bus bridge --------------------------------------------------------
+# Single module-level bus that crew_engine callbacks can push into and
+# observability panels subscribe to.  Wired here so app.py owns the lifecycle.
+
+crew_event_bus: Event[ProtocolEvent] = Event()  # type: ignore[valid-type]
+observability.crew_event_bus = crew_event_bus
 
 # ═══════════════════════════════════════════════
 #  Session Defaults
@@ -130,10 +140,12 @@ def _render_canvas_placeholder() -> None:
     )
 
 
-def _render_observability_placeholder() -> None:
-    ui.label("Real-time execution dashboard will appear here.").classes(
-        THEME.typography.BODY
-    )
+def _render_observability() -> None:
+    """Render the observability dashboard via the dedicated module."""
+    # Determine active crew_id from session or event bus state.
+    # For now, pass None (empty state) — future PRs will wire active crew
+    # selection from the event bus subscription.
+    observability.render_observability(crew_id=None)
 
 
 def _render_operations_placeholder() -> None:
@@ -169,7 +181,7 @@ def canvas_page() -> None:
 @ui.page("/observability")
 def observability() -> None:
     """Observability view — real-time execution dashboard."""
-    render_page("Observability", _render_observability_placeholder)
+    render_page("Observability", _render_observability)
 
 
 @ui.page("/operations")

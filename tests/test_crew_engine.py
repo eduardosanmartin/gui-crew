@@ -1241,7 +1241,8 @@ class TestEdgeCases:
         from crew_engine import Adapter
 
         crew_model = models.CrewModel(name="Empty Crew")
-        with patch(_MOD_CREWAI_CREW) as MockCrew:
+        with patch(_MOD_CREWAI_AGENT) as MockAgent, \
+             patch(_MOD_CREWAI_CREW) as MockCrew:
             MockCrew.return_value = MagicMock()
             result = Adapter.build_crewai_object(crew_model)
             assert result is not None
