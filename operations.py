@@ -29,6 +29,7 @@ from typing import Any, Callable
 from nicegui import app, ui
 
 import models
+import observability
 from styles import THEME
 
 _LOG = logging.getLogger(__name__)
@@ -1077,13 +1078,29 @@ def _render_single_task_test() -> None:
 
 
 # ============================================================================
-#  Agent Playground  (Playground PR 1 — skeleton)
+#  Agent Playground  (Playground PR 2 — execution flow + stacked panels)
 # ============================================================================
 
 # Module-level run state keyed by session/tab ID.
 # Each session stores the last N=2 runs as deque entries:
-#   {crew_id, agent_role, prompt, start_time, status}
+#   {crew_id, agent_role, prompt, start_time, status, handle}
 _playground_runs: dict[str, deque] = {}
+
+
+def _get_session_id() -> str:
+    """Return a stable session identifier for this browser tab.
+
+    Generates a short UUID on first access and stores it in
+    ``app.storage.user`` so it persists across page reloads within
+    the same session.
+    """
+    from uuid import uuid4
+
+    sid = app.storage.user.get("_playground_sid")
+    if not sid:
+        sid = uuid4().hex[:12]
+        app.storage.user["_playground_sid"] = sid
+    return sid
 
 
 def _get_crew_model() -> models.CrewModel | None:
@@ -1097,21 +1114,213 @@ def _get_crew_model() -> models.CrewModel | None:
         return None
 
 
-def _run_agent(agent_role: str, prompt: str) -> None:
-    """Placeholder for PR 2 execution logic."""
-    pass
+def _run_playground(agent_role: str, prompt: str) -> None:
+    """Execute a single agent in the playground with event-routed streaming.
+
+    Generates a ``pg-{uuid}`` crew_id, calls ``CrewEngine.test_agent()``
+    on a background thread, and stores the ``ExecutionHandle`` in
+    ``_playground_runs`` so the user can stop the run cooperatively.
+
+    Events from the execution are routed to both ``observability._dispatch``
+    (for the micro streaming panel) and ``_on_playground_event`` (to
+    update run status in the stacked panels).
+    """
+    import time
+    from uuid import uuid4
+
+    from crew_engine import CrewEngine
+
+    session_id = _get_session_id()
+    crew_model = _get_crew_model()
+
+    if not crew_model:
+        ui.notify("No crew configured. Build a crew first.", type="warning")
+        return
+    if not prompt.strip():
+        ui.notify("Enter a prompt for the agent.", type="warning")
+        return
+
+    crew_id = f"pg-{uuid4().hex[:12]}"
+    run = {
+        "crew_id": crew_id,
+        "agent_role": agent_role,
+        "prompt": prompt,
+        "start_time": time.time(),
+        "status": "running",
+        "handle": None,
+        "error": None,
+        "timeout_seconds": None,
+    }
+
+    def _on_event(event: dict) -> None:
+        """Bridge: route events to observability AND update playground state."""
+        try:
+            observability._dispatch(event)
+        except Exception as exc:
+            _LOG.error("Error dispatching to observability: %s", exc)
+        _on_playground_event(event)
+
+    engine = CrewEngine()
+    handle = engine.test_agent(
+        crew_model=crew_model,
+        agent_role=agent_role,
+        prompt=prompt,
+        on_event=_on_event,
+    )
+    run["handle"] = handle
+
+    runs = _playground_runs.setdefault(session_id, deque(maxlen=2))
+    runs.append(run)
+
+    _render_playground.refresh()
 
 
-def _stop_agent() -> None:
-    """Placeholder for PR 2 cancellation logic."""
-    pass
+def _stop_playground() -> None:
+    """Cooperatively cancel the most recent running agent execution."""
+    session_id = _get_session_id()
+    runs = _playground_runs.get(session_id, deque())
+
+    if not runs:
+        return
+
+    current_run = runs[-1]
+    handle = current_run.get("handle")
+
+    if handle and handle.thread.is_alive():
+        handle.flag["stop"] = True
+        current_run["status"] = "stopping"
+        _render_playground.refresh()
 
 
+def _on_playground_event(event: dict) -> None:
+    """Update playground run status when agent lifecycle events arrive.
+
+    Called from the ``on_event`` callback in the background execution
+    thread.  Finds the matching run by ``crew_id`` and refreshes the
+    playground panel so the UI reflects the new status.
+
+    Crashes in this handler are silently caught so engine errors never
+    bring down the client UI.
+    """
+    try:
+        event_type = event.get("type")
+        crew_id = event.get("crew_id")
+        if not crew_id:
+            return
+
+        # Locate the matching run across all sessions
+        for session_runs in _playground_runs.values():
+            for run in session_runs:
+                if run["crew_id"] == crew_id:
+                    if event_type == "agent.completed":
+                        run["status"] = "completed"
+                    elif event_type == "agent.error":
+                        run["status"] = "error"
+                        run["error"] = event.get("error", "Unknown error")
+                    elif event_type == "agent.timeout":
+                        run["status"] = "timeout"
+                        run["timeout_seconds"] = event.get(
+                            "timeout_seconds"
+                        )
+                    elif event_type == "agent.stopped":
+                        run["status"] = "stopped"
+                    break
+
+        _render_playground.refresh()
+    except Exception as exc:
+        _LOG.exception("Error handling playground event: %s", exc)
+
+
+def _render_playground_panel(panel_run: dict) -> None:
+    """Render a single playground run card with streaming output.
+
+    Parameters
+    ----------
+    panel_run : dict
+        A run entry from ``_playground_runs`` with keys:
+        ``crew_id``, ``agent_role``, ``prompt``, ``start_time``,
+        ``status``, ``handle``, ``error``, ``timeout_seconds``.
+    """
+    from datetime import datetime
+
+    status: str = panel_run.get("status", "idle")
+    crew_id: str = panel_run["crew_id"]
+    agent_role: str = panel_run.get("agent_role", "Unknown")
+    prompt: str = panel_run.get("prompt", "")
+    start_ts = panel_run.get("start_time", 0)
+
+    _STATUS_COLORS = {
+        "running": "blue",
+        "completed": "green",
+        "error": "red",
+        "stopping": "orange",
+        "stopped": "amber",
+        "timeout": "amber",
+        "idle": "grey",
+    }
+
+    with ui.card().classes("w-full mb-4"):
+        # ── Header row: agent role + status badge ──────────────────────
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label(f"Agent: {agent_role}").classes("font-bold")
+            color = _STATUS_COLORS.get(status, "grey")
+            ui.badge(status.capitalize(), color=color)
+
+        # ── Prompt (truncated) ─────────────────────────────────────────
+        display_prompt = prompt if len(prompt) <= 100 else prompt[:100] + "…"
+        ui.label(f"Prompt: {display_prompt}").classes("text-sm text-grey-6")
+
+        # ── Timestamp ──────────────────────────────────────────────────
+        if start_ts:
+            time_str = datetime.fromtimestamp(start_ts).strftime("%H:%M:%S")
+            ui.label(f"Started: {time_str}").classes(
+                "text-caption text-grey-5"
+            )
+
+        # ── Error / timeout inline rendering ───────────────────────────
+        if status == "error":
+            error_msg = panel_run.get("error", "Unknown error")
+            ui.label(f"❌ {error_msg}").classes("text-red text-sm q-mt-sm")
+            return
+
+        if status == "timeout":
+            timeout_sec = panel_run.get("timeout_seconds", "?")
+            ui.label(
+                f"⏱ Execution timed out after {timeout_sec}s"
+            ).classes("text-amber text-sm q-mt-sm")
+            return
+
+        if status == "stopping":
+            ui.label("Stopping running agent…").classes(
+                "text-orange text-sm q-mt-sm"
+            )
+            return
+
+        if status == "stopped":
+            ui.label("Execution stopped by user.").classes(
+                "text-amber text-sm q-mt-sm"
+            )
+            return
+
+        # ── Streaming tokens via observability micro panel ─────────────
+        observability._render_micro(crew_id)
+
+        # ── Stop button (only when running) ────────────────────────────
+        if status == "running":
+            ui.button(
+                "Stop",
+                icon="stop",
+                on_click=_stop_playground,
+            ).props("flat color=red")
+
+
+@ui.refreshable
 def _render_playground() -> None:
     """Agent playground accordion — standalone single-agent testing UI.
 
-    Renders an accordion with agent selection, prompt input, Run/Stop
-    buttons, and an output panel skeleton.  Execution wiring lands in PR 2.
+    Shows an agent selector, prompt textarea, and Run/Stop buttons.
+    Completed runs appear as stacked cards (last 2) with streaming
+    token output powered by the observability micro panel.
     """
     crew_model = _get_crew_model()
 
@@ -1132,7 +1341,7 @@ def _render_playground() -> None:
         # ── Prompt textarea ───────────────────────────────────────────
         prompt_input = ui.textarea(
             label="Prompt",
-            placeholder="Enter your prompt...",
+            placeholder="Enter your prompt…",
         ).props("outlined").classes("w-full")
 
         # ── Run / Stop buttons ────────────────────────────────────────
@@ -1140,20 +1349,26 @@ def _render_playground() -> None:
             ui.button(
                 "Run",
                 icon="play_arrow",
-                on_click=lambda: _run_agent(
+                on_click=lambda: _run_playground(
                     agent_dropdown.value, prompt_input.value
                 ),
             )
             ui.button(
                 "Stop",
                 icon="stop",
-                on_click=_stop_agent,
+                on_click=_stop_playground,
             ).props("outline")
 
-        # ── Output panel skeleton (PR 2 wires to observability) ───────
-        with ui.card().classes("w-full mt-4"):
-            ui.label("Output").classes("font-bold")
-            ui.label("Status: idle").classes("text-grey")
+        # ── Stacked run panels (last 2) ───────────────────────────────
+        session_id = _get_session_id()
+        runs = _playground_runs.get(session_id, deque())
+
+        if runs:
+            ui.separator()
+            for run in reversed(runs):  # newest first
+                _render_playground_panel(run)
+        else:
+            ui.label("No runs yet").classes("text-grey q-mt-md")
 
 
 # ============================================================================
@@ -1164,14 +1379,18 @@ def _render_playground() -> None:
 def render_operations() -> None:
     """Render the full Operations page.
 
-    Called by the ``/operations`` route via ``app.py``.  Renders four
+    Called by the ``/operations`` route via ``app.py``.  Renders five
     sections in an accordion layout:
-    1. Template Gallery (built-in + custom)
-    2. Execution History (with filters and comparison)
-    3. Import / Export
-    4. Single-Task Test
+    1. Playground (open by default)
+    2. Template Gallery (built-in + custom)
+    3. Execution History (with filters and comparison)
+    4. Import / Export
+    5. Single-Task Test
     """
     with ui.column().classes("w-full gap-4"):
+        # Section 0 — Playground (Task 3.1)
+        _render_playground()
+
         # Section 1 — Templates
         with ui.expansion("Templates", value=True).classes("w-full"):
             _render_template_gallery()

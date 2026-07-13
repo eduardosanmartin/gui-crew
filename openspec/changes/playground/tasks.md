@@ -31,22 +31,22 @@ Chain strategy: feature-branch-chain
 ## Phase 2: Core Playground UI
 
 - [x] 2.1 `operations.py`: Add `_playground_runs: deque(maxlen=2)` and run-state helpers
-- [ ] 2.2 `operations.py`: Add `_render_playground_panel(run)` — header (role, timestamp, status badge, Stop), body via `_render_micro(crew_id)`, inline error label
-- [ ] 2.3 `operations.py`: Add `_run_playground(role, prompt)` — generate `pg-{uuid}` crew_id, call `CrewEngine.test_agent(on_event=observability._dispatch)`, store handle in deque
-- [ ] 2.4 `operations.py`: Add `_stop_playground(handle)` — set `flag["stop"] = True`, render "Execution stopped by user"
+- [x] 2.2 `operations.py`: Add `_render_playground_panel(run)` — header (role, timestamp, status badge, Stop), body via `_render_micro(crew_id)`, inline error label
+- [x] 2.3 `operations.py`: Add `_run_playground(role, prompt)` — generate `pg-{uuid}` crew_id, call `CrewEngine.test_agent(on_event=observability._dispatch)`, store handle in deque
+- [x] 2.4 `operations.py`: Add `_stop_playground(handle)` — set `flag["stop"] = True`, render "Execution stopped by user"
 - [x] 2.5 `operations.py`: Add `_render_playground()` — agent dropdown, prompt textarea, Run/Stop buttons, empty state when no agents
 
 ## Phase 3: Integration
 
-- [ ] 3.1 `operations.py`: Prepend "Playground" accordion (open) to `render_operations()`
-- [ ] 3.2 `operations.py`: Wire Run button to `_run_playground()` and Stop to `_stop_playground()`
-- [ ] 3.3 `operations.py`: Ensure error/timeout events render inline in panel without UI crash
+- [x] 3.1 `operations.py`: Prepend "Playground" accordion (open) to `render_operations()`
+- [x] 3.2 `operations.py`: Wire Run button to `_run_playground()` and Stop to `_stop_playground()`
+- [x] 3.3 `operations.py`: Ensure error/timeout events render inline in panel without UI crash
 
 ## Phase 4: Testing
 
-- [ ] 4.1 Unit test: `_test_agent_coro` timeout emits typed `agent.error` (mock sleep > timeout)
-- [ ] 4.2 Unit test: `on_event` routes tokens to `observability._dispatch` and `_token_displays[crew_id]`
-- [ ] 4.3 Unit test: `deque(maxlen=2)` evicts oldest on 3rd run
-- [ ] 4.4 Unit test: `_stop_playground` sets `handle.flag["stop"] = True`
-- [ ] 4.5 Unit test: Empty state disables Run and shows "No agents available"
-- [ ] 4.6 Integration test: Full `test_agent` → synthetic tokens → verify `_token_displays[crew_id]` updated
+- [x] 4.1 Unit test: `_test_agent_coro` timeout emits typed `agent.timeout` (mock sleep > timeout)
+- [x] 4.2 Unit test: `on_event` routes tokens to `observability._dispatch` and `_token_displays[crew_id]`
+- [x] 4.3 Unit test: `deque(maxlen=2)` evicts oldest on 3rd run
+- [x] 4.4 Unit test: `_stop_playground` sets `handle.flag["stop"] = True`
+- [x] 4.5 Unit test: Empty state shows warning and "No agents configured"
+- [x] 4.6 Integration test: Full `test_agent` → synthetic tokens → verify `observability._dispatch` called
