@@ -131,10 +131,9 @@ def _route_event(crew_id: str, event: ProtocolEvent) -> None:
         if event_type == "guardrail.failed":
             _update_errors(crew_id, event)
 
-    # -- Meso layer: agent / tool / delegation / knowledge ------------------
-    elif event_type.startswith("agent.") or event_type.startswith("tool."):
-        _update_activity_log(crew_id, event)
-    elif event_type.startswith("memory.") or event_type.startswith("knowledge."):
+    # -- Meso layer: agent / tool / delegation / memory / knowledge -----------
+    elif event_type.startswith(("agent.", "tool.", "memory.",
+                                 "knowledge.", "delegation.")):
         _update_activity_log(crew_id, event)
 
     # -- Micro layer: token streaming ---------------------------------------
@@ -264,14 +263,99 @@ def _update_crew_state(crew_id: str, event: ProtocolEvent) -> None:
 
 
 def _update_activity_log(crew_id: str, event: ProtocolEvent) -> None:
-    """Append an agent / tool / delegation / knowledge card entry."""
+    """Append a structured meso card entry from an agent / tool / delegation /
+    memory / knowledge event.
+
+    Normalises the raw ``ProtocolEvent`` into a card dict with a short
+    ``type`` (``agent`` | ``tool`` | ``delegation`` | ``memory`` |
+    ``knowledge``) and a flat set of display-ready fields so the renderer
+    can switch on card type cleanly.
+    """
     log = _activity_log.setdefault(crew_id, [])
-    log.append({
-        "ts": event.get("ts", time.time()),
-        "type": event.get("type", ""),
-        **{k: v for k, v in event.items()
-           if k not in ("type", "crew_id", "ts")},
-    })
+    event_type: str = event.get("type", "")
+    ts = event.get("ts", time.time())
+
+    # -- Agent cards ----------------------------------------------------------
+    if event_type.startswith("agent."):
+        log.append({
+            "ts": ts,
+            "type": "agent",
+            "agent_role": event.get("agent_role", ""),
+            "task_name": event.get("task_name", ""),
+            "status": "running" if event_type == "agent.started" else "completed",
+        })
+
+    # -- Tool cards -----------------------------------------------------------
+    elif event_type.startswith("tool."):
+        if event_type == "tool.call_start":
+            log.append({
+                "ts": ts,
+                "type": "tool",
+                "tool_name": event.get("tool_name", ""),
+                "agent_role": event.get("agent_role", ""),
+                "params": event.get("params", {}),
+                "status": "running",
+            })
+        elif event_type == "tool.call_end":
+            error = event.get("error")
+            log.append({
+                "ts": ts,
+                "type": "tool",
+                "result_summary": event.get("result_summary", ""),
+                "duration_ms": event.get("duration_ms", 0),
+                "error": error,
+                "status": "error" if error else "completed",
+            })
+        elif event_type == "tool.progress":
+            tool_name = event.get("tool_name", "")
+            # Find the most recent running tool card for this tool and attach
+            # progress info (or create a standalone card).
+            for card in reversed(log):
+                if card.get("type") == "tool" and card.get("tool_name") == tool_name and card.get("status") == "running":
+                    card["elapsed_ms"] = event.get("elapsed_ms", 0)
+                    card["status_message"] = event.get("status_message", "")
+                    break
+            else:
+                log.append({
+                    "ts": ts,
+                    "type": "tool",
+                    "tool_name": tool_name,
+                    "status": "running",
+                    "elapsed_ms": event.get("elapsed_ms", 0),
+                    "status_message": event.get("status_message", ""),
+                })
+
+    # -- Delegation cards -----------------------------------------------------
+    elif event_type.startswith("delegation."):
+        log.append({
+            "ts": ts,
+            "type": "delegation",
+            "from_agent": event.get("from_agent", ""),
+            "to_agent": event.get("to_agent", ""),
+            "context": event.get("context", ""),
+            "response": event.get("response"),
+            "status": "running" if event_type == "delegation.started" else "completed",
+        })
+
+    # -- Memory cards ---------------------------------------------------------
+    elif event_type.startswith("memory."):
+        log.append({
+            "ts": ts,
+            "type": "memory",
+            "kind": event.get("kind", ""),
+            "query": event.get("query", ""),
+            "query_time_ms": event.get("query_time_ms", 0),
+        })
+
+    # -- Knowledge cards ------------------------------------------------------
+    elif event_type.startswith("knowledge."):
+        log.append({
+            "ts": ts,
+            "type": "knowledge",
+            "kind": event.get("kind", ""),
+            "query": event.get("query", ""),
+            "chunks": event.get("chunks", 0),
+        })
 
 
 def _handle_token(crew_id: str, event: ProtocolEvent) -> None:
@@ -416,6 +500,156 @@ def _render_macro(crew_id: str) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  Meso Panel — agent / tool / delegation / memory / knowledge cards
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _activity_card_border(status: str) -> str:
+    """Map a card status to a left-border colour class."""
+    return {
+        "running": "border-l-4 border-blue",
+        "completed": "border-l-4 border-green",
+        "error": "border-l-4 border-red",
+    }.get(status, "border-l-4 border-grey")
+
+
+def _render_activity_card(activity: dict[str, Any]) -> None:
+    """Render a single meso activity card based on its ``type`` field."""
+    card_type: str = activity.get("type", "")
+    status = activity.get("status", "")
+
+    # -- Agent card -----------------------------------------------------------
+    if card_type == "agent":
+        with ui.card().classes(f"mb-2 p-3 {_activity_card_border(status)}"):
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("person", color="blue").classes("text-h6")
+                ui.label(
+                    f"Agent: {activity.get('agent_role', 'Unknown')}"
+                ).classes("font-bold")
+            with ui.row().classes("items-center gap-2 q-mt-xs"):
+                ui.label(f"Status: {status}").classes("text-caption")
+            if activity.get("task_name"):
+                ui.label(
+                    f"Task: {activity['task_name']}"
+                ).classes("text-caption text-grey")
+
+    # -- Tool card ------------------------------------------------------------
+    elif card_type == "tool":
+        with ui.card().classes(f"mb-2 p-3 {_activity_card_border(status)}"):
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("build", color="orange").classes("text-h6")
+                tool_name = activity.get("tool_name") or activity.get(
+                    "result_summary", "Unknown"
+                )[:60]
+                ui.label(f"Tool: {tool_name}").classes("font-bold")
+            with ui.row().classes("items-center gap-2 q-mt-xs"):
+                ui.label(f"Status: {status}").classes("text-caption")
+            if activity.get("duration_ms"):
+                ui.label(
+                    f"Duration: {activity['duration_ms']}ms"
+                ).classes("text-caption")
+            params = activity.get("params")
+            if params:
+                ui.label(
+                    f"Input: {_truncate_dict_repr(params)}"
+                ).classes("text-xs text-grey")
+            result = activity.get("result_summary")
+            if result:
+                ui.label(f"Result: {result}").classes("text-xs")
+            error = activity.get("error")
+            if error:
+                ui.label(f"Error: {error}").classes("text-xs text-red")
+            elapsed = activity.get("elapsed_ms")
+            if elapsed:
+                msg = activity.get("status_message", "")
+                ui.label(f"Running: {elapsed}ms {msg}").classes(
+                    "text-caption text-grey"
+                )
+
+    # -- Delegation card ------------------------------------------------------
+    elif card_type == "delegation":
+        with ui.card().classes(f"mb-2 p-3 {_activity_card_border(status)}"):
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("swap_horiz", color="purple").classes("text-h6")
+                ui.label("Delegation").classes("font-bold")
+            ui.label(
+                f"From: {activity.get('from_agent', '?')} "
+                f"→ To: {activity.get('to_agent', '?')}"
+            ).classes("text-body2 q-mt-xs")
+            ui.label(f"Status: {status}").classes("text-caption")
+            ctx = activity.get("context")
+            if ctx:
+                ui.label(f"Context: {ctx}").classes("text-xs text-grey")
+            response = activity.get("response")
+            if response:
+                ui.label(f"Response: {response}").classes("text-xs")
+
+    # -- Memory card ----------------------------------------------------------
+    elif card_type == "memory":
+        with ui.card().classes("mb-2 p-3 border-l-4 border-teal"):
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("memory", color="teal").classes("text-h6")
+                ui.label(
+                    f"Memory: {activity.get('kind', 'op')}"
+                ).classes("font-bold")
+            query = activity.get("query")
+            if query:
+                ui.label(f"Query: {query}").classes("text-caption")
+            query_time = activity.get("query_time_ms")
+            if query_time:
+                ui.label(f"Time: {query_time}ms").classes("text-caption")
+
+    # -- Knowledge card -------------------------------------------------------
+    elif card_type == "knowledge":
+        with ui.card().classes("mb-2 p-3 border-l-4 border-indigo"):
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("lightbulb", color="indigo").classes("text-h6")
+                ui.label(
+                    f"Knowledge: {activity.get('kind', 'op')}"
+                ).classes("font-bold")
+            query = activity.get("query")
+            if query:
+                ui.label(f"Query: {query}").classes("text-caption")
+            chunks = activity.get("chunks")
+            if chunks:
+                ui.label(f"Chunks: {chunks}").classes("text-caption")
+
+
+def _truncate_dict_repr(obj: object, max_len: int = 120) -> str:
+    """Safe truncated representation of an object for inline card display."""
+    try:
+        s = repr(obj)
+    except Exception:
+        s = str(obj)
+    if len(s) > max_len:
+        return s[:max_len] + "…"
+    return s
+
+
+@ui.refreshable
+def _render_meso(crew_id: str) -> None:
+    """Render the meso-layer activity log: agent, tool, delegation, memory,
+    and knowledge cards in a scrollable panel, newest-first.
+
+    Each card is driven by the events stored in ``_activity_log[crew_id]``.
+    """
+    activities = _activity_log.get(crew_id, [])
+
+    with ui.card().classes("w-full q-pa-md rounded-borders"):
+        ui.label("Activity Log").classes("text-h6 font-bold q-mb-sm")
+
+        if not activities:
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("list", color="grey-5")
+                ui.label("No activity yet").classes("text-caption text-grey")
+            return
+
+        with ui.scroll_area().classes("h-96"):
+            for activity in reversed(activities):
+                _render_activity_card(activity)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  Empty State — shown when no active crew
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -452,5 +686,10 @@ def render_observability(crew_id: str | None = None) -> None:
     # Replay any buffered events missed during disconnect
     _replay_buffer(crew_id)
 
-    # Macro layer — always visible for PR 5a
+    # Macro layer — crew pipeline and progress
     _render_macro(crew_id)
+
+    ui.separator()
+
+    # Meso layer — agent / tool / delegation / memory / knowledge cards
+    _render_meso(crew_id)

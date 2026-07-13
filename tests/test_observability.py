@@ -639,3 +639,324 @@ class TestModuleIntegrity:
         # crew_event_bus is None until wired by app.py (at import time).
         # When running alongside other tests that import app.py, it may
         # already be wired — both states are valid depending on import order.
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Meso State Accumulation — agent, tool, delegation, memory, knowledge
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestMesoAgentCards:
+    """Agent events produce correctly structured activity-log cards."""
+
+    def test_agent_started_creates_running_card(self):
+        """agent.started → card with type='agent', status='running'."""
+        observability._dispatch(
+            _evt("agent.started", crew_id="c1", agent_role="Researcher",
+                 task_name="Research task")
+        )
+        log = observability._activity_log.get("c1", [])
+        assert len(log) == 1
+        card = log[0]
+        assert card["type"] == "agent"
+        assert card["agent_role"] == "Researcher"
+        assert card["task_name"] == "Research task"
+        assert card["status"] == "running"
+
+    def test_agent_completed_creates_completed_card(self):
+        """agent.completed → card with type='agent', status='completed'."""
+        observability._dispatch(
+            _evt("agent.completed", crew_id="c1", agent_role="Researcher",
+                 task_name="Research task")
+        )
+        log = observability._activity_log.get("c1", [])
+        assert len(log) == 1
+        card = log[0]
+        assert card["type"] == "agent"
+        assert card["status"] == "completed"
+
+    def test_agent_cards_isolated_by_crew_id(self):
+        """Agent events for different crews do NOT cross-contaminate."""
+        observability._dispatch(
+            _evt("agent.started", crew_id="crew-A", agent_role="Alpha")
+        )
+        observability._dispatch(
+            _evt("agent.started", crew_id="crew-B", agent_role="Beta")
+        )
+        log_a = observability._activity_log.get("crew-A", [])
+        log_b = observability._activity_log.get("crew-B", [])
+        assert len(log_a) == 1
+        assert log_a[0]["agent_role"] == "Alpha"
+        assert len(log_b) == 1
+        assert log_b[0]["agent_role"] == "Beta"
+
+
+class TestMesoToolCards:
+    """Tool events produce correctly structured activity-log cards."""
+
+    def test_tool_call_start_creates_running_card(self):
+        """tool.call_start → card with type='tool', status='running'."""
+        observability._dispatch(
+            _evt("tool.call_start", crew_id="c1", tool_name="search_tool",
+                 agent_role="Researcher",
+                 params={"query": "AI trends"})
+        )
+        log = observability._activity_log.get("c1", [])
+        assert len(log) == 1
+        card = log[0]
+        assert card["type"] == "tool"
+        assert card["tool_name"] == "search_tool"
+        assert card["agent_role"] == "Researcher"
+        assert card["params"] == {"query": "AI trends"}
+        assert card["status"] == "running"
+
+    def test_tool_call_end_creates_completed_card(self):
+        """tool.call_end → card with type='tool', status='completed',
+        duration, result."""
+        observability._dispatch(
+            _evt("tool.call_end", crew_id="c1", result_summary="Found 10 results",
+                 duration_ms=450, error=None)
+        )
+        log = observability._activity_log.get("c1", [])
+        assert len(log) == 1
+        card = log[0]
+        assert card["type"] == "tool"
+        assert card["result_summary"] == "Found 10 results"
+        assert card["duration_ms"] == 450
+        assert card["status"] == "completed"
+        assert "tool_name" not in card  # tool.call_end doesn't carry tool_name
+
+    def test_tool_call_end_with_error_creates_error_card(self):
+        """tool.call_end with error → status='error'."""
+        observability._dispatch(
+            _evt("tool.call_end", crew_id="c1", error="Connection refused",
+                 duration_ms=120, result_summary="")
+        )
+        log = observability._activity_log.get("c1", [])
+        assert len(log) == 1
+        card = log[0]
+        assert card["type"] == "tool"
+        assert card["status"] == "error"
+        assert card["error"] == "Connection refused"
+
+    def test_tool_progress_updates_existing_running_card(self):
+        """tool.progress attaches elapsed_ms to latest matching running card."""
+        observability._dispatch(
+            _evt("tool.call_start", crew_id="c1", tool_name="long_tool",
+                 agent_role="Worker", params={})
+        )
+        observability._dispatch(
+            _evt("tool.progress", crew_id="c1", tool_name="long_tool",
+                 elapsed_ms=5000, status_message="Running for 5s...")
+        )
+        log = observability._activity_log.get("c1", [])
+        assert len(log) == 1  # still one card — progress updated in-place
+        card = log[0]
+        assert card["elapsed_ms"] == 5000
+        assert card["status_message"] == "Running for 5s..."
+
+    def test_tool_progress_creates_standalone_on_no_match(self):
+        """tool.progress without prior tool.call_start creates standalone."""
+        observability._dispatch(
+            _evt("tool.progress", crew_id="c1", tool_name="orphan_tool",
+                 elapsed_ms=3000, status_message="Running...")
+        )
+        log = observability._activity_log.get("c1", [])
+        assert len(log) == 1
+        card = log[0]
+        assert card["type"] == "tool"
+        assert card["tool_name"] == "orphan_tool"
+        assert card["elapsed_ms"] == 3000
+
+    def test_tool_start_and_end_separate_cards(self):
+        """A tool call produces two cards: start (running) then end (completed)."""
+        observability._dispatch(
+            _evt("tool.call_start", crew_id="c1", tool_name="search",
+                 agent_role="Agent", params={"q": "test"})
+        )
+        observability._dispatch(
+            _evt("tool.call_end", crew_id="c1", result_summary="Done",
+                 duration_ms=300)
+        )
+        log = observability._activity_log.get("c1", [])
+        assert len(log) == 2
+        assert log[0]["type"] == "tool"
+        assert log[0]["status"] == "running"
+        assert log[0]["tool_name"] == "search"
+        assert log[1]["type"] == "tool"
+        assert log[1]["status"] == "completed"
+        assert log[1]["duration_ms"] == 300
+
+
+class TestMesoDelegationCards:
+    """Delegation events produce cards with from→to agents."""
+
+    def test_delegation_started_creates_running_card(self):
+        """delegation.started → card with from/to agents."""
+        observability._dispatch(
+            _evt("delegation.started", crew_id="c1",
+                 from_agent="Manager", to_agent="Analyst",
+                 context="Analyze the market data")
+        )
+        log = observability._activity_log.get("c1", [])
+        assert len(log) == 1
+        card = log[0]
+        assert card["type"] == "delegation"
+        assert card["from_agent"] == "Manager"
+        assert card["to_agent"] == "Analyst"
+        assert card["context"] == "Analyze the market data"
+        assert card["status"] == "running"
+
+    def test_delegation_completed_creates_completed_card(self):
+        """delegation.completed → card with response."""
+        observability._dispatch(
+            _evt("delegation.completed", crew_id="c1",
+                 from_agent="Manager", to_agent="Analyst",
+                 response="Market is trending upward")
+        )
+        log = observability._activity_log.get("c1", [])
+        assert len(log) == 1
+        card = log[0]
+        assert card["type"] == "delegation"
+        assert card["status"] == "completed"
+        assert card["response"] == "Market is trending upward"
+
+
+class TestMesoMemoryCards:
+    """Memory operation events produce cards with kind, query, time."""
+
+    def test_memory_op_creates_card(self):
+        """memory.op → card with type='memory', kind, query, query_time_ms."""
+        observability._dispatch(
+            _evt("memory.op", crew_id="c1", kind="long_term",
+                 query="What is the capital of France?",
+                 query_time_ms=250)
+        )
+        log = observability._activity_log.get("c1", [])
+        assert len(log) == 1
+        card = log[0]
+        assert card["type"] == "memory"
+        assert card["kind"] == "long_term"
+        assert card["query"] == "What is the capital of France?"
+        assert card["query_time_ms"] == 250
+
+    def test_memory_short_term_kind(self):
+        """Short-term memory ops are captured with kind='short_term'."""
+        observability._dispatch(
+            _evt("memory.op", crew_id="c1", kind="short_term",
+                 query="Recent conversation", query_time_ms=50)
+        )
+        card = observability._activity_log["c1"][0]
+        assert card["kind"] == "short_term"
+
+
+class TestMesoKnowledgeCards:
+    """Knowledge operation events produce cards with kind, query, chunks."""
+
+    def test_knowledge_op_creates_card(self):
+        """knowledge.op → card with type='knowledge', kind, query, chunks."""
+        observability._dispatch(
+            _evt("knowledge.op", crew_id="c1", kind="retrieval_completed",
+                 query="company quarterly report",
+                 chunks=7)
+        )
+        log = observability._activity_log.get("c1", [])
+        assert len(log) == 1
+        card = log[0]
+        assert card["type"] == "knowledge"
+        assert card["kind"] == "retrieval_completed"
+        assert card["query"] == "company quarterly report"
+        assert card["chunks"] == 7
+
+    def test_knowledge_retrieval_started_kind(self):
+        """Retrieval started events have kind='retrieval_started'."""
+        observability._dispatch(
+            _evt("knowledge.op", crew_id="c1", kind="retrieval_started",
+                 query="sales data", chunks=0)
+        )
+        card = observability._activity_log["c1"][0]
+        assert card["kind"] == "retrieval_started"
+        assert card["chunks"] == 0
+
+
+class TestMesoActivityOrder:
+    """Activity log preserves chronological insertion order (oldest-first
+    in state) so that the renderer can reverse for newest-first display."""
+
+    def test_activities_in_chronological_order(self):
+        """Activities are appended in order — index 0 is oldest."""
+        base_ts = 1000.0
+        observability._dispatch(
+            _evt("agent.started", crew_id="c1", ts=base_ts + 1,
+                 agent_role="First")
+        )
+        observability._dispatch(
+            _evt("agent.started", crew_id="c1", ts=base_ts + 2,
+                 agent_role="Second")
+        )
+        observability._dispatch(
+            _evt("agent.started", crew_id="c1", ts=base_ts + 3,
+                 agent_role="Third")
+        )
+        log = observability._activity_log.get("c1", [])
+        assert len(log) == 3
+        # Oldest first
+        assert log[0]["agent_role"] == "First"
+        assert log[1]["agent_role"] == "Second"
+        assert log[2]["agent_role"] == "Third"
+
+    def test_reversed_yields_newest_first(self):
+        """Reversing the log yields newest-first (for rendering)."""
+        observability._dispatch(
+            _evt("agent.started", crew_id="c1", agent_role="Oldest")
+        )
+        observability._dispatch(
+            _evt("agent.completed", crew_id="c1", agent_role="Newest")
+        )
+        log = observability._activity_log.get("c1", [])
+        reversed_log = list(reversed(log))
+        assert reversed_log[0]["agent_role"] == "Newest"
+        assert reversed_log[1]["agent_role"] == "Oldest"
+
+    def test_mixed_activity_types_in_order(self):
+        """Mixed agent/tool/memory/knowledge events arrive in insertion order."""
+        observability._dispatch(
+            _evt("agent.started", crew_id="c1", agent_role="A1")
+        )
+        observability._dispatch(
+            _evt("tool.call_start", crew_id="c1", tool_name="t1")
+        )
+        observability._dispatch(
+            _evt("memory.op", crew_id="c1", kind="short_term")
+        )
+        observability._dispatch(
+            _evt("knowledge.op", crew_id="c1", kind="retrieval_completed")
+        )
+        observability._dispatch(
+            _evt("delegation.started", crew_id="c1",
+                 from_agent="Mgr", to_agent="Wkr")
+        )
+        log = observability._activity_log.get("c1", [])
+        assert len(log) == 5
+        assert log[0]["type"] == "agent"
+        assert log[1]["type"] == "tool"
+        assert log[2]["type"] == "memory"
+        assert log[3]["type"] == "knowledge"
+        assert log[4]["type"] == "delegation"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Meso Module Attributes
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestMesoModuleAttributes:
+    """Meso layer functions are importable from the module."""
+
+    def test_render_meso_is_module_attribute(self):
+        """_render_meso is a module-level function."""
+        assert hasattr(observability, "_render_meso")
+
+    def test_update_activity_log_is_module_attribute(self):
+        """_update_activity_log is a module-level function."""
+        assert hasattr(observability, "_update_activity_log")
